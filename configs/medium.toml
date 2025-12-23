@@ -1,0 +1,36 @@
+# lm_config.toml
+[training.params]
+epochs = 1
+steps_per_epoch = 15
+batch_size = 8
+alpha_max = 0.003
+alpha_min = 0.0003
+warmup_iter = 100
+theta = 10000
+cooldown_iter = 12
+checkpoint_every = 5
+
+[data.params]
+path = "tiny_stories_train_token_out/"
+tag = "shard_"
+num_shards = 100
+
+[model]
+name = "cs336_basics.TransformerLM.TransformerLM"
+
+[model.params]
+vocab_size = 32000
+context_length = 256
+num_layers = 24
+d_model = 1024
+num_heads = 16
+d_ff = 4096
+device = "cuda"
+
+[optimizer]
+name = "cs336_basics.adamW.AdamW"
+
+[optimizer.params]
+weight_decay = 0.01
+betas = [0.9, 0.95]
+eps = 1e-8

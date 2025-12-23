@@ -1,0 +1,12 @@
+| Embedding Matrix : E = Tx                     | T -[V,d_model] , x - [B,C]<br>⇒ E - [B,C,d_model]                                    | 0                                    |               |
+| --------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------ | ------------- |
+| Transformer Block :<br>Pre Norm Block         | E - [B,C,d_model]<br>doesnt qualify                                                  | 0                                    |               |
+| Transformer Block :<br>Projection operation   | x - [B,C,d_model]<br>K,Q - [d_model,d_model]<br>P_{k} / P_{q} / P_{v}- [B,C,d_model] | 3\*[B\*(C\*d_model)\*(2\*d_model)]   | 15728640000   |
+| Transformer Block :<br>Score computation      | Q- [B,N,C,D]<br>K - [B,N,C,D]<br>\=Operation - Q\*K<br>[B,N,C,C]                     | B\*num_heads\*(2\*d_head) \* C\*C    | 3355443200    |
+| Transformer Block :<br>Score @ V              | QK - [B,N,C,C]<br>V - [B,N,C,D/num_heads]<br>QKV - [B,N,C,D/num_heads]               | B\*num_heads\*C\*D/num_heads\*(2\*C) | 3355443200    |
+| Transformer Block :<br>Output projection      | W - [ C,d_model]<br>mha_op - [B,C,d_model]                                           | B\*C\*d_model\*(2\*d_model)          | 5242880000    |
+| Transformer Block :<br>FF NN Linear layer     | x - [B,C,d_model]<br>W - [d_model,d_ff]                                              | B\*C\*d_ff\*(2\*d_model)             | 20971520000   |
+| Transformer Block :<br>FF NN linear layer Glu | x - [B,C,d_model]<br>W - [d_model,d_ff]                                              | B\*C\*d_ff\*(2\*d_model)             | 20971520000   |
+| Transformer Block :<br>FF NN linear layer     | x - [B,C,d_ff]<br>W - [d_ff,d_model]                                                 | B\*C\*d_model\*(2\*d_ff)             | 20971520000   |
+| LM model<br>Linear Layer                      | x - [B,C,d_model]<br>W- [ V,d_model ]                                                | B\*C\*V\*(2\*d_model)                | 164682137600  |
+| Total FLOPS                                   |                                                                                      |                                      | 4513336524800 |

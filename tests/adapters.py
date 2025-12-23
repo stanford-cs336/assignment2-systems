@@ -5,7 +5,6 @@ from typing import Type
 import torch
 
 
-
 def get_flashattention_autograd_function_pytorch() -> Type:
     """
     Returns a torch.autograd.Function subclass that implements FlashAttention2.
@@ -16,7 +15,9 @@ def get_flashattention_autograd_function_pytorch() -> Type:
         A class object (not an instance of the class)
     """
     # For example: return MyFlashAttnAutogradFunctionClass
-    raise NotImplementedError
+    from cs336_systems import pytorch_flash_attention
+
+    return pytorch_flash_attention.flashAtten
 
 
 def get_flashattention_autograd_function_triton() -> Type:
@@ -56,7 +57,9 @@ def get_ddp_individual_parameters(module: torch.nn.Module) -> torch.nn.Module:
     raise NotImplementedError
 
 
-def ddp_individual_parameters_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+def ddp_individual_parameters_on_after_backward(
+    ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer
+):
     """
     Code to run after the backward pass is completed, but before we take
     an optimizer step.
@@ -92,7 +95,9 @@ def get_ddp_bucketed(module: torch.nn.Module, bucket_size_mb: float) -> torch.nn
     raise NotImplementedError
 
 
-def ddp_bucketed_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+def ddp_bucketed_on_after_backward(
+    ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer
+):
     """
     Code to run after the backward pass is completed, but before we take
     an optimizer step.
@@ -107,7 +112,9 @@ def ddp_bucketed_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.
     raise NotImplementedError
 
 
-def ddp_bucketed_on_train_batch_start(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+def ddp_bucketed_on_train_batch_start(
+    ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer
+):
     """
     Code to run at the very start of the training step.
 
@@ -120,7 +127,9 @@ def ddp_bucketed_on_train_batch_start(ddp_model: torch.nn.Module, optimizer: tor
     raise NotImplementedError
 
 
-def get_sharded_optimizer(params, optimizer_cls: Type[torch.optim.Optimizer], **kwargs) -> torch.optim.Optimizer:
+def get_sharded_optimizer(
+    params, optimizer_cls: Type[torch.optim.Optimizer], **kwargs
+) -> torch.optim.Optimizer:
     """
     Returns a torch.optim.Optimizer that handles optimizer state sharding
     of the given optimizer_cls on the provided parameters.

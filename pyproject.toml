@@ -32,8 +32,7 @@ package = true
 python-preference = "managed"
 
 [tool.uv.sources]
-cs336-basics = { path = "./cs336-basics", editable = true }  # Change this path to your assignment1-basics repo you want to use your own implementation!
-
+cs336-basics = { path = "./model", editable = true } # Change this path to your assignment1-basics repo you want to use your own implementation!
 
 
 [tool.pytest.ini_options]
@@ -50,6 +49,4 @@ line-length = 120
 
 [tool.ruff.lint]
 extend-select = ["UP"]
-ignore = [
-    "F722"
-]
+ignore = ["F722"]
