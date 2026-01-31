@@ -26,7 +26,7 @@ XL_CONFIG = {
     "context_length": 128,  # Kept small for memory safety on standard GPUs
 }
 
-def run_naive_ddp(rank, world_size, backend, global_input_ids, global_target_ids):
+def run_naive_ddp(rank, world_size, backend, global_input_ids, global_target_ids,flat = False):
     """Executes Naïve DDP Benchmarking with the XL Model."""
     
     # 1. SETUP
@@ -91,11 +91,20 @@ def run_naive_ddp(rank, world_size, backend, global_input_ids, global_target_ids
         sync()
         t2 = time.perf_counter()
         
-        for param in model.parameters():
-            if param.grad is None:
-                continue
-            # Naive DDP: Send every tensor individually
-            dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG)
+        if flat:
+            params_with_grad = [p for p in model.parameters() if p.grad is not None]
+            grads = [p.grad for p in params_with_grad]
+            flat_buffer = torch._utils._flatten_dense_tensors(grads)
+            dist.all_reduce(flat_buffer, op=dist.ReduceOp.AVG)
+            restored_grads = torch._utils._unflatten_dense_tensors(flat_buffer, grads)
+            for p, synced_grad in zip(params_with_grad, restored_grads):
+                p.grad.data.copy_(synced_grad)
+        else:    
+            for param in model.parameters():
+                if param.grad is None:
+                    continue
+                # Naive DDP: Send every tensor individually
+                dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG)
             
         sync()
         t3 = time.perf_counter()
@@ -138,7 +147,7 @@ def run_naive_ddp(rank, world_size, backend, global_input_ids, global_target_ids
 
 if __name__ == "__main__":
     world_size = 2
-    batch_size = 4 # As per assignment spec for XL model
+    batch_size = 2 # As per assignment spec for XL model
     
     # Generate Random Integer Data (Token IDs)
     # Shape: (Batch, Context_Length)
@@ -158,7 +167,7 @@ if __name__ == "__main__":
     print("Spawning processes...")
     mp.spawn(
         run_naive_ddp,
-        args=(world_size, "nccl", global_input_ids, global_target_ids),
+        args=(world_size, "nccl", global_input_ids, global_target_ids, True),
         nprocs=world_size,
         join=True,
     )
