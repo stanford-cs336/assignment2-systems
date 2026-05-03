@@ -35,7 +35,7 @@
 
 \question{Problem: Benchmarking Script}
 \subquestion{(a) Benchmarking script implementation}
-\placeholder{State implementation status for the benchmarking script that measures forward-only, forward-plus-backward, and full training steps.}
+The script is implemented in \texttt{cs336\_systems/profiling\_benchmarking/benchmarking\_script.py}. It initializes a \texttt{BasicsTransformerLM} from configurable hyperparameters, generates a random batch, and times three modes via a \texttt{method} argument: forward-only (\texttt{f}), forward-plus-backward (\texttt{fb}), and a full training step with the optimizer (\texttt{fbo}). Each timed call is bracketed by \texttt{torch.cuda.synchronize()}. A configurable number of warm-up iterations precede measurement. Experiment drivers call the core functions via Modal to run on a B200 GPU and write results to \LaTeX{} tables.
 
 \subquestion{(b) Model-size timing results}
 \begin{table}[H]
@@ -44,10 +44,10 @@
   \caption{Mean and standard deviation of forward, backward, and optimizer-step timings in seconds on a Modal B200, using batch size 4, context length 256, 5 warm-up steps, 10 measurement steps, and bfloat16 weights.}
 \end{table}
 
-The forward pass ranges from 0.0113s for the small model to 0.0438s for the 10B model. The backward pass ranges from 0.0173s to 0.1351s, and is consistently more expensive than the forward pass. The standard deviations are small relative to the means for the forward pass, while the largest models show somewhat more variability for backward and optimizer-step timing.
+The forward pass ranges from 0.011\,s for the small model to 0.284\,s for the 7B model. The backward pass ranges from 0.018\,s to 0.519\,s and is consistently more expensive than the forward pass. Standard deviations are small relative to the means for the forward pass. The largest models show somewhat more variability for backward and optimizer-step timing.
 
 \subquestion{(c) Warm-up ablation}
-\placeholder{Compare timings with zero warm-up steps and with 1--2 warm-up steps. Explain in 2--3 sentences why results differ from the 5-warm-up setting.}
+With zero warm-up steps, the first measurement includes CUDA lazy context initialization, cuBLAS GEMM algorithm selection, and PyTorch allocator bookkeeping. These one-time costs make the first timing several times the steady-state value and produce large standard deviations. With 1--2 warm-up steps, CUDA is already initialized and the allocator has committed the required memory, so most measurements drop close to steady-state. For larger models, the second or third step can still be slower because PyTorch's autograd JIT graph may not have fully converged and cuBLAS can still be refining its GEMM kernel selection for the widest matrix dimensions. Five warm-up steps are sufficient to saturate all caches for every model size tested, yielding small standard deviations.
 
 \question{Problem: Nsight Systems Profiling}
 \subquestion{(a) Forward-pass time}
@@ -63,7 +63,7 @@ The forward pass ranges from 0.0113s for the small model to 0.0438s for the 10B 
   \caption{Forward-pass time from Nsight Systems CUDA GPU kernel summaries compared with the Python standard-library timing benchmark.}
 \end{table}
 
-The Nsight forward-pass GPU kernel time agrees reasonably well with the Python benchmark: for example, the small model at context 4096 is 256.6ms in Nsight versus 294.9ms from Python, and the medium model at context 2048 is 252.9ms versus 274.0ms. The Python timing is slightly larger because it includes CPU launch overhead and synchronization around the whole step, while the Nsight value shown here is cumulative GPU kernel time inside the captured forward pass.
+The Nsight forward-pass GPU kernel time agrees reasonably well with the Python benchmark. For example, the small model at context 4096 is 256.6\,ms in Nsight versus 294.9\,ms from Python, and the medium model at context 2048 is 252.9\,ms versus 274.0\,ms. The Python timing is slightly larger because it includes CPU launch overhead and synchronization around the whole step, while the Nsight value is cumulative GPU kernel time inside the captured forward pass.
 
 \subquestion{(b) Dominant CUDA kernel}
 \begin{table}[H]
@@ -72,205 +72,419 @@ The Nsight forward-pass GPU kernel time agrees reasonably well with the Python b
   \caption{Dominant forward-pass kernel family and aggregate kernel fractions from Nsight Systems. ``FBO'' denotes the full forward, backward, and optimizer-step profile.}
 \end{table}
 
-The dominant cumulative forward-pass CUDA kernel is a CUTLASS FP32 SGEMM kernel in every profiled configuration, with the top kernel invoked between 24 and 97 times depending on model size and context length. It is also the main family in the forward-plus-backward profiles for most settings, though at the small model with context 4096 a PyTorch elementwise kernel becomes the single largest cumulative kernel in the full training-step profile.
+The dominant cumulative forward-pass CUDA kernel is a CUTLASS FP32 SGEMM kernel in every profiled configuration. The top kernel is invoked between 24 and 97 times depending on model size and context length. It is also the main family in the forward-plus-backward profiles for most settings, though at the small model with context 4096 a PyTorch elementwise kernel becomes the single largest cumulative kernel in the full training-step profile.
 
 \subquestion{(c) Non-matmul kernels}
-Besides matrix multiplies, the main non-trivial forward kernels are softmax-related reductions and elementwise kernels: max reductions, exponentials, sum reductions, residual and normalization elementwise operations, SwiGLU sigmoid/elementwise kernels, and batched copy/cat kernels. These become more visible at longer context lengths because attention softmax is memory- and reduction-heavy even though it has far fewer FLOPs than the dense matrix multiplications.
+Besides matrix multiplies, the main non-trivial forward kernels are softmax-related reductions and elementwise kernels: max reductions, exponentials, sum reductions, residual and normalization elementwise operations, SwiGLU sigmoid/elementwise kernels, and batched copy/cat kernels. These become more visible at longer context lengths because attention softmax is memory-bound and reduction-heavy, even though it has far fewer FLOPs than the dense matrix multiplications.
 
 \subquestion{(d) Full training-step profile}
-The matrix-multiplication fraction drops when moving from inference to a full training step: for example, small context 256 goes from 78.2\% to 64.7\%, medium context 256 goes from 81.0\% to 68.3\%, and medium context 2048 goes from 62.8\% to 61.2\%. Elementwise kernels become much more important in the full step, reaching 28--36\% in most configurations and 47.7\% for the small model at context 4096, largely due to backward and AdamW update work.
+The matrix-multiplication fraction drops when moving from inference to a full training step. For example, small context 256 goes from 78.2\% to 64.7\%, medium context 256 goes from 81.0\% to 68.3\%, and medium context 2048 goes from 62.8\% to 61.2\%. Elementwise kernels become much more important in the full step, reaching 28--36\% in most configurations and 47.7\% for the small model at context 4096, largely due to backward and AdamW update work.
 
 \subquestion{(e) Attention softmax versus matmul}
-Softmax-related kernels are much cheaper than the matrix multiplies, but not by the same margin suggested by FLOP counts: for the small model at context 4096, matmul kernels account for 49.8\% of forward GPU time while softmax-ish kernels account for 10.1\%, and for the medium model at context 2048 the split is 62.8\% versus 7.1\%. The softmax runtime is relatively high for its FLOP count because it is dominated by memory traffic, reductions, and exponentials rather than dense compute.
+Softmax-related kernels are much cheaper than the matrix multiplies, but not by the same margin suggested by FLOP counts. For the small model at context 4096, matmul kernels account for 49.8\% of forward GPU time while softmax-related kernels account for 10.1\%. For the medium model at context 2048 the split is 62.8\% versus 7.1\%. Softmax runtime is relatively high for its FLOP count because it is dominated by memory traffic, reductions, and exponentials rather than dense compute.
 
 \question{Problem: Mixed-Precision Accumulation}
-\placeholder{Comment in 2--3 sentences on the accuracy of the four accumulation experiments.}
+Running \texttt{cs336\_systems/mixed\_precision\_accumulation.py} gives $10.0001$ for all-FP32 accumulation, $9.9531$ when both the accumulator and addends are FP16, and $10.0021$ when the accumulator is FP32 but each term is first written as FP16. The FP16 run loses almost half a unit because the half-precision accumulator has growing ULPs, so many later additions round away. The last two cases match because in-place addition into FP32 promotes the addend; the residual bias versus $10$ comes from FP16's coarse representation of $0.01$, not from the accumulator dtype.
 
 \question{Problem: Benchmarking Mixed Precision}
 \subquestion{(a) Autocast dtypes in ToyModel}
-\placeholder{List the dtype of model parameters, fc1 output, layer norm output, logits, loss, and gradients under FP16 autocast.}
+On a CUDA GPU with \texttt{torch.autocast(device\_type="cuda", dtype=torch.float16)} and FP32 parameters: stored weights remain \textbf{FP32}; the \texttt{fc1} (post-ReLU) activation is \textbf{FP16}; \texttt{LayerNorm} runs in full precision so its output is \textbf{FP32}; \texttt{fc2} logits are \textbf{FP16}; cross-entropy loss is evaluated in \textbf{FP32}; gradients w.r.t.\ the FP32 parameters are \textbf{FP32}.
 
 \subquestion{(b) Layer normalization and mixed precision}
-\placeholder{Explain in 2--3 sentences which layer-normalization computations are precision-sensitive and whether BF16 changes the concern.}
+The sensitive parts span the whole normalization pipeline. Reductions for the mean and variance are sensitive, as is cancellation when estimating centered second moments with small variance. Division by $\sigma$ and the preceding \texttt{sqrt} amplify any error in $\mu$ and $\sigma^2$. BF16 shares FP32's exponent range, so extreme overflow and underflow are less of a concern than with FP16. However, BF16's 7-bit trailing mantissa means rounding in sums and cancellation can still matter. Mixed-precision stacks therefore often compute layer norm in FP32 under autocast even when matrix multiplies use BF16.
 
 \subquestion{(c) Transformer mixed-precision benchmarking}
-\placeholder{Report timings with and without BF16 mixed precision for each model size and summarize trends in 2--3 sentences.}
+\begin{table}[H]
+  \centering
+  \input{tables/benchmarking_mixed_precision.tex}
+  \caption{Forward and backward timings on Modal B200, batch size 4, context length 256, $5$ warm-up and $10$ timed steps per configuration; BF16 denotes \texttt{torch.autocast(..., dtype=torch.bfloat16)}. Table generated by \texttt{benchmarking\_script\_experiment\_mixed\_precision.py}.}
+  \label{tab:benchmark-mixed-precision}
+\end{table}
+
+Table~\ref{tab:benchmark-mixed-precision} compares strict FP32 matmuls (\texttt{configure\_fp32\_precision}) to the same FP32-parameter model with BF16 \texttt{torch.autocast}. BF16 lowers forward means by about $1.5\times$ on \emph{small}, about $3\times$ on \emph{large}, and about $6.5$--$8\times$ on \emph{xl} and \emph{7B}. Backward speedups are more muted, roughly $1.3\times$ up to $\sim5.3\times$, consistent with backward still spending substantial time outside Tensor-Core-heavy GEMMs. Timings also become much less variable under BF16 for the bigger models; for example, xl forward standard deviation falls from $0.030$\,s to $0.003$\,s.
 
 \question{Problem: Memory Profiling}
 \subquestion{(a) Active memory timelines}
-\placeholder{Include two memory-viz active memory timeline figures for the xl model: forward-only and full training step. Add a 2--3 sentence description of the observed peaks.}
+Figure~\ref{fig:mem-xl-forward} shows the active memory timeline for an \emph{xl} forward-only step (context length $2048$, batch $4$, BF16 \texttt{autocast}). Figure~\ref{fig:mem-xl-fbo} shows a full training step (forward, backward, AdamW) with the same context and BF16 \texttt{autocast} on batch $2$, because batch $4$ at this configuration exceeds available HBM during training with dense attention. The forward-only trace is a roughly flat baseline ($\sim$13\,GiB) with periodic spikes up to $\sim$18.6\,GiB as each \texttt{TransformerBlock} introduces transient activations. The full-step trace shows a large climb from $\sim$37\,GiB to $\sim$112\,GiB through forward as residuals accrue, then a stepped descent through backward as those tensors are freed while gradients appear, with a small rise near the optimizer update.
 
 \begin{figure}[H]
   \centering
-  \figureplaceholder{Insert forward-pass memory timeline image here.}
-  \caption{Placeholder: xl forward-pass active memory timeline.}
+  \includegraphics[width=\linewidth]{figures/memory_xl_ctx2048_forward_bf16.png}
+  \caption{Active memory timeline: \emph{xl} inference-style forward (single step, \texttt{torch.inference\_mode}), context $2048$, batch $4$, BF16 \texttt{autocast}; profile \texttt{xl\_ctx2048\_f\_bf16.pickle} via \texttt{memory\_profile\_experiment.py}.}
+  \label{fig:mem-xl-forward}
 \end{figure}
 
 \begin{figure}[H]
   \centering
-  \figureplaceholder{Insert full-training-step memory timeline image here.}
-  \caption{Placeholder: xl full-training-step active memory timeline.}
+  \includegraphics[width=\linewidth]{figures/memory_xl_ctx2048_fbo_bf16_b2.png}
+  \caption{Active memory timeline: \emph{xl} full training step, context $2048$, batch $2$, BF16 \texttt{autocast}; profile \texttt{xl\_ctx2048\_fbo\_bf16\_b2.pickle}.}
+  \label{fig:mem-xl-fbo}
 \end{figure}
 
 \subquestion{(b) Peak memory by context length}
-\placeholder{Insert a table with peak memory for context lengths 128 and 2048, split by forward pass and full training step.}
+Peaks are CUDA \texttt{max\_memory\_allocated()} during the traced step (Modal B200). Numbers below use FP32 matmuls for comparability; full training at context $2048$ uses batch $2$ (see footnote in table).
+
+\begin{table}[H]
+  \centering
+  \input{tables/memory_profile_peaks.tex}
+  \caption{Peak allocated memory (\texttt{torch.cuda.max\_memory\_allocated}) for \emph{xl}, from \texttt{profiles/memory\_viz/peaks.csv}.}
+  \label{tab:memory-peaks}
+\end{table}
+
+\smallskip\noindent$^*$Dense attention materializes large $[B, H, T, T]$ tensors; at $T{=}2048$, batch $4$ for a full step exceeds GPU memory, so the traced snapshot uses batch $2$.
 
 \subquestion{(c) Mixed-precision peak memory}
-\placeholder{Report peak memory for mixed precision, for both forward-only and full training-step profiles, and comment in 2--3 sentences.}
+At context $128$, BF16 \texttt{autocast} leaves peaks almost unchanged (forward $\approx 12.78$\,GiB FP32 vs.\ $\approx 12.79$\,GiB BF16; full step $\approx 63.49$\,GiB vs.\ $\approx 63.48$\,GiB). Memory at short context is dominated by FP32 weights, optimizer state, and other FP32 paths rather than activations. At context $2048$, forward peak drops from $\approx 21.18$\,GiB (FP32) to $\approx 19.14$\,GiB (BF16), and the full step at batch $2$ drops from $\approx 143.43$\,GiB to $\approx 119.98$\,GiB. Mixed precision reduces memory most when long-context dense attention and block activations form a large fraction of peak.
 
 \subquestion{(d) Residual-stream activation size}
-\placeholder{Give a 1--2 sentence derivation of the single-precision residual-stream activation tensor size for the xl model.}
+The post-embedding hidden states entering each block have shape $[\text{batch}, \text{seq length}, d_{\text{model}}]$; in FP32 that is $4 \cdot B \cdot T \cdot d_{\text{model}}$ bytes. For \emph{xl} ($d_{\text{model}}{=}2560$) at batch $4$, this is $4 \times 4 \times T \times 2560 = 40{,}960\,T$ bytes. That is $\mathbf{5}$\,\textbf{MiB} at $T{=}128$ and $\mathbf{80}$\,\textbf{MiB} at $T{=}2048$ (using MiB${}=2^{20}$).
 
 \subquestion{(e) Largest allocations in memory-viz}
-\placeholder{Identify the largest allocations visible after reducing memory-viz detail and state where their stack traces point.}
+The dominant blocks are on the order of $\sim$2\,GiB per-layer, matching FP32 tensors shaped like pre-softmax scores or attention weights $[B, n_{\text{heads}}, T, T]$ (e.g.\ $4 \times 32 \times 2048^2 \times 4$\,bytes $\approx 2$\,GiB at batch $4$). Stack traces point into \texttt{scaled\_dot\_product\_attention} and the \texttt{einsum} forming $QK^\top$, then the \texttt{softmax} path that materializes the normalized weights.
 
-\subquestion{(f) Nsight memory profiling}
-\placeholder{Include Nsight screenshots, list the five largest saved-for-backward contributors in a TransformerBlock, and provide a 1--2 paragraph memory accounting response.}
+\subquestion{(f) Per-block memory attribution}
+The five largest tensors saved for backward by one xl \texttt{TransformerBlock} (batch 4, context 2048, FP32) are: (1) the pre-softmax attention score matrix $\mathbf{S}=\mathbf{QK}^\top/\!\sqrt{d}$, shape $[4,32,2048,2048]$, $\approx\!2048$\,MiB; (2) the post-softmax weight matrix $\mathbf{P}=\mathrm{softmax}(\mathbf{S})$, identical shape, $\approx\!2048$\,MiB; (3) the SwiGLU first gate $x_1 = xW_1$, shape $[4,2048,10240]$, $320$\,MiB; (4) the SwiGLU second gate $x_2 = xW_2$, same shape, $320$\,MiB; (5) the block's residual input $x$, shape $[4,2048,2560]$, $80$\,MiB. These five total $\approx\!4816$\,MiB. $\mathbf{S}$ and $\mathbf{P}$ alone account for roughly $85\%$ of the dominant footprint, confirming that dense $O(T^2)$ attention dominates activation storage at long context.
+
+During backward, saved tensors are freed while weight gradients are emitted. Weight gradients for one xl block total roughly $400$\,MiB: four attention projection matrices ($\mathbf{W}_Q,\mathbf{W}_K,\mathbf{W}_V,\mathbf{W}_O$) at $2560^2\times 4\,\text{B}\approx25$\,MiB each, plus the three MLP matrices ($W_1,W_2$ each $2560\times 10240\times 4\,\text{B}=100$\,MiB and $W_3$ at the same). The ${\sim}4816$\,MiB of dominant activations is about $12\times$ the ${\sim}400$\,MiB of weight gradients produced, so peak memory during a full training step is activation-dominated rather than gradient-dominated. This is consistent with Table~\ref{tab:memory-peaks}: the full-step peak grows steeply with context length (reflecting $O(T^2)$ attention matrices) while the weight-gradient contribution is constant in $T$.
 
 \section*{3 Single-GPU Memory}
 
 \question{Problem: Memory-Optimal Gradient Checkpointing}
 \subquestion{(a) Optimal strategy ignoring compute}
-\placeholder{Describe the checkpointing strategy in 3--5 sentences, including asymptotic peak activation memory and compute. Add the requested short code-sketch placeholder.}
+Use nested checkpoints via recursive bisection on the depth-$N$ stack: split indices $[\mathrm{lo},\mathrm{hi}]$ at $\mathrm{mid}$, checkpoint the forward through $[\mathrm{lo},\mathrm{mid}]$, checkpoint the forward through $[\mathrm{mid}+1,\mathrm{hi}]$, and recurse until $\mathrm{lo}=\mathrm{hi}$ where a single block runs without checkpointing. During backward, the graph never retains saved tensors from disjoint halves simultaneously across recomputation phases. Peak activation storage scales as $\Theta(\log N)$ in units of one boundary activation, versus $\Theta(N)$ for the vanilla chain. Only $\Theta(\log N)$ checkpoint boundaries stay live between recomputation waves while deeper tensors are reconstructed on demand. The price is recomputation: each layer participates in $\Theta(\log N)$ recomputation phases, giving $\Theta(N\log N)$ forward-equivalent passes versus $\Theta(N)$ without checkpointing.
+
+\begin{verbatim}
+from torch.utils.checkpoint import checkpoint
+
+def forward_recursive(x, layers, lo, hi):
+    if lo == hi:
+        return layers[lo](x)
+    mid = (lo + hi) // 2
+
+    def first_half(t):
+        return forward_recursive(t, layers, lo, mid)
+
+    def second_half(t):
+        return forward_recursive(t, layers, mid + 1, hi)
+
+    x_mid = checkpoint(first_half, x, use_reentrant=False)
+    return checkpoint(second_half, x_mid, use_reentrant=False)
+\end{verbatim}
 
 \subquestion{(b) One-step recomputation budget}
-\placeholder{For the xl model at batch size 4 and sequence length 2048, describe the best non-nested checkpointing strategy, report measured peak memory, and compare neighboring block sizes.}
+With only non-nested checkpoints, the classical $\Theta(\sqrt{N})$ intuition assumes comparable memory cost per layer so that balancing segment length against number of boundaries matters. Here each \texttt{TransformerBlock} allocates large dense-attention tensors ($O(B\,T^2)$ under BF16 autocast), so the transient footprint inside one recomputed chunk dominates residual bookkeeping. Shrinking the checkpoint span lowers peak strongly until each chunk is a single layer. Table~\ref{tab:gradient-checkpoint-peaks} profiles \texttt{torch.cuda.max\_memory\_allocated()} during one AdamW-style forward+backward step on Modal B200 for \emph{xl} ($d_{\mathrm{model}}{=}2560$, $32$ layers, batch $4$, context $2048$, BF16 \texttt{autocast}).
+
+\begin{table}[H]
+  \centering
+  \input{tables/gradient_checkpoint_peaks.tex}
+  \caption{Peak allocated CUDA memory during one training-style step while varying contiguous layers wrapped per \texttt{checkpoint} call (non-nested). ``Vanilla'' uses no checkpointing; chunk size $32$ wraps the full stack once.}
+  \label{tab:gradient-checkpoint-peaks}
+\end{table}
+
+The measured optimum is \textbf{one layer per checkpoint} (chunk size $1$): peak $\mathbf{37.90}$\,\textbf{GiB}. Coarsening to two layers per checkpoint raises peak to $\mathbf{42.15}$\,\textbf{GiB}; chunk size $4$ reaches $\mathbf{50.67}$\,\textbf{GiB}. Finer-than-one-layer segmentation is impossible without splitting inside \texttt{TransformerBlock}. Wrapping all $32$ layers once matches vanilla ($\mathbf{169.86}$\,\textbf{GiB}), showing that a single top-level checkpoint does not shrink peak because nearly all tensors saved for backward are materialized inside that one recomputation region.
 
 \section*{4 GPU Kernels}
 
 \question{Problem: PyTorch Attention Benchmarking}
 \subquestion{(a) Attention scaling benchmark}
-\placeholder{Insert a table of forward/backward timings or OOMs over the requested sequence lengths and head dimensions. Include memory calculations for a small OOM configuration and a 1--2 paragraph discussion.}
+Table~\ref{tab:pytorch-attention-benchmark} benchmarks \texttt{cs336\_basics.model.scaled\_dot\_product\_attention} with batch size $B{=}8$, single-head tensors $Q,K,V\in\mathbb{R}^{B\times T\times d}$, FP32 matmul precision, $100$ timed forward iterations, and $100$ backward timings each measured after synchronizing a fresh forward pass. \texttt{torch.cuda.synchronize()} wraps each timed region. CUDA allocator footprint ``before backward'' is \texttt{torch.cuda.memory\_allocated()} immediately after \texttt{loss\,=\,out.sum()} on the traced graph (Modal B200).
+
+\begin{table}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{tables/pytorch_attention_benchmark.tex}}
+  \caption{Mean forward/backward latency per iteration (ms) and CUDA bytes allocated before the first backward for dense dot-product attention ($B{=}8$, head dimension $d\in\{16,32,64,128\}$, sequence length $T$). No grid point triggered OOM on this GPU.}
+  \label{tab:pytorch-attention-benchmark}
+\end{table}
+
+\textbf{OOM:} Every configuration in the requested Cartesian product completed successfully on Modal B200. The peak measured footprint stays below $\approx16.9$\,GiB at $(T,d)=(16384,128)$.
+
+\textbf{Memory accounting:} Let logits $S=QK^{\top}/\sqrt{d}\in\mathbb{R}^{B\times T\times T}$ and softmax probabilities $P=\mathrm{softmax}(S)$ along the key axis. Standard autograd keeps both $S$ and $P$ for the backward through softmax and the matmuls, so retained activation bytes are dominated by two FP32 tensors of size $BT^{2}$, contributing approximately $2\cdot 4BT^{2}=8BT^{2}$ bytes, plus smaller $\Theta(BTd)$ terms. Plugging in $(B,T)=(8,16384)$ gives $8\cdot 8\cdot16384^{2}\approx1.72\times10^{10}$ bytes $\approx16.0$\,GiB from the pair alone, matching the measured $\approx16434$--$16658$\,MiB range across $d$.
+
+\textbf{Scaling with $T$:} Holding $d$ fixed, allocator usage grows roughly quadratically in $T$ because the dominant retained tensors scale like $BT^{2}$. For example at $d{=}16$, CUDA allocated jumps $\approx4130$\,MiB at $T{=}8192$ to $\approx16434$\,MiB at $T{=}16384$, a ratio $\approx4\times$ consistent with doubling $T$ quadrupling $T^{2}$.
+
+\textbf{Removing this cost:} IO-aware fused kernels such as FlashAttention avoid materializing full $T\times T$ softmax tensors by tiling softmax with recomputed blocks on SRAM, with the same asymptotic compute but a drastically smaller HBM footprint.
 
 \question{Problem: Torch Compile}
 \subquestion{(a) Compiled attention benchmark}
-\placeholder{Insert a table comparing compiled versus uncompiled attention forward and backward timings.}
+Table~\ref{tab:attention-torch-compile} adds \texttt{torch.compile(AttentionModule())} around the same single-head attention as Table~\ref{tab:pytorch-attention-benchmark} ($B{=}8$, FP32, Modal B200). Inductor speeds up forward substantially once $T\ge4096$; for example $(T,d){=}(16384,16)$ drops from $\approx26.7$\,ms to $\approx12.0$\,ms. Backward times improve even more at long context ($\approx57.4$\,ms to $\approx23.4$\,ms at the same corner). At very short sequences ($T{=}256$), compilation overhead and kernel launch granularity dominate, resulting in slightly worse backward latency than vanilla.
+
+\begin{table}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{tables/pytorch_attention_torch_compile.tex}}
+  \caption{Dense attention: vanilla versus \texttt{torch.compile} mean forward/backward time per timed iteration (ms). CSV: \texttt{tables/pytorch\_attention\_torch\_compile.csv}.}
+  \label{tab:attention-torch-compile}
+\end{table}
 
 \subquestion{(b) Compiled Transformer benchmark}
-\placeholder{Insert a table comparing vanilla and compiled Transformer timing for forward, forward-plus-backward, and full training steps.}
+Table~\ref{tab:transformer-torch-compile} wraps the full \texttt{BasicsTransformerLM} with \texttt{torch.compile}, matching \texttt{benchmarking\_script\_experiment\_1}: batch $4$, context $256$, FP32 weights, AdamW, $5$ warm-up and $10$ timed steps per phase.
+
+\begin{table}[H]
+  \centering
+  \input{tables/benchmarking_transformer_compile.tex}
+  \caption{End-to-end Transformer: mean seconds per step for vanilla versus \texttt{torch.compile}. Backward column is mean$(\mathrm{fb})-\mathrm{mean}(\mathrm{f})$; optimizer column is mean$(\mathrm{fbo})-\mathrm{mean}(\mathrm{fb})$. Script: \texttt{cs336\_systems/benchmarking\_transformer\_compile.py}.}
+  \label{tab:transformer-torch-compile}
+\end{table}
+
+Forward-only time improves sharply for \emph{small} and \emph{medium} ($\sim2\times$) and still wins on \emph{large}. The \emph{xl} and \emph{7B} models suffer a modest forward regression ($\approx6$--$8\%$), consistent with Dynamo/Inductor guard overhead and kernel choice on the widest matrices. Backward and optimizer phases speed up at every scale; for example, \emph{xl} backward drops from $\approx0.300$\,s to $\approx0.276$\,s compiled, and AdamW drops from $\approx0.048$\,s to $\approx0.033$\,s.
 
 \question{Problem: FlashAttention-2 Forward Pass}
 \subquestion{(a) PyTorch FlashAttention-2 forward}
-\placeholder{State implementation status and test result for the pure PyTorch autograd.Function forward pass.}
+The reference forward implements tiled online softmax (FlashAttention-style blocking) in pure PyTorch with \texttt{einops.rearrange}. It returns output $O$ and row log-sum-exp $L$ needed by the backward. \texttt{pytest -k test\_flash\_forward\_pass\_pytorch} passes.
 
 \subquestion{(b) Triton FlashAttention-2 forward}
-\placeholder{State implementation status and test result for the Triton forward kernel.}
+The Triton kernel mirrors the same tile loop, with one program per query tile and batch index. \texttt{pytest -k test\_flash\_forward\_pass\_triton} passes on CUDA.
 
 \subquestion{(c) Causal masking}
-\placeholder{State implementation status and test result for the optional causal masking flag.}
+Both implementations apply causal masking with mask value $-10^{6}$ on disallowed $(q,k)$ pairs before softmax. Tests cover causal and non-causal modes.
 
 \question{Problem: FlashAttention-2 Backward Pass}
-\placeholder{State implementation status and test result for the PyTorch/torch.compile backward pass.}
+Backward uses recomputation with the handout $D$ vector, implemented via the closed-form softmax Jacobian using $D$ as the row correction term. The substantive backward body runs in FP32 inside \texttt{torch.compile} so Inductor stays dtype-stable for BF16 inputs; gradients are cast back to the input dtype. \texttt{pytest -k test\_flash\_backward} passes.
 
 \question{Problem: FlashAttention-2 Benchmarking}
 \subquestion{(a) Triton versus PyTorch attention}
-\placeholder{Insert a table comparing Triton FlashAttention-2 and regular PyTorch attention for forward, backward, and end-to-end latencies across sequence length, embedding dimension, and precision.}
+Table~\ref{tab:flash-benchmark-modal} compares the Triton fused forward plus \texttt{torch.compile} dense recomputation backward (\texttt{FlashAttention2Triton}) against regular dense PyTorch attention (matmul, masked softmax, matmul). Batch size is $1$, masking is causal, and inputs are random draws fixed per $(T,d,\mathrm{dtype})$ seed. Timings are median milliseconds from \texttt{triton.testing.do\_bench} ($25$ warm-up, $100$ repeats) on a single Modal B200. Sequence lengths sweep $T\in\{128,\ldots,65536\}$ (powers of two), head dimensions $d\in\{16,\ldots,128\}$ (powers of two), dtypes BF16 and FP32.
+
+\begin{table}[H]
+  \centering
+  \footnotesize
+  {\bfseries BF16}\par\vspace{0.5em}
+  \resizebox{\textwidth}{!}{\input{tables/benchmark_flash_attention_modal_bf16.tex}}
+  \medskip
+  {\bfseries FP32}\par\vspace{0.5em}
+  \resizebox{\textwidth}{!}{\input{tables/benchmark_flash_attention_modal_fp32.tex}}
+  \caption{FlashAttention-2 (student Triton forward + compiled backward) versus dense PyTorch attention: median latency (ms). \emph{Py}~= dense baseline; \emph{Tr}~= \texttt{FlashAttention2Triton}. Upper block: BF16; lower block: FP32.}
+  \label{tab:flash-benchmark-modal}
+\end{table}
+
+At short sequences ($T\lesssim 2{,}048$), Triton forward is already much faster than materializing a full $T\times T$ softmax matrix. Reported backward times remain on the same order as the dense baseline because both paths run a dense-gradient-style backward through large logits. At large $T$, the fused forward gap grows; for example at $T{=}65536$, $d{=}128$, BF16: $\approx 30$\,ms dense versus $\approx 17$\,ms Triton forward. End-to-end latency is often dominated by backward work unless a fully fused backward is implemented. BF16 versus FP32 shifts absolute milliseconds but does not change the qualitative comparison.
 
 \section*{5 Distributed Data Parallel Training}
 
 \question{Problem: Distributed Communication (Single Node)}
-\placeholder{Insert plot(s) and/or table(s) comparing all-reduce runtime across tensor sizes and GPU counts, with 2--3 sentences of commentary.}
+Single-node benchmarks use the NCCL backend with \texttt{torch.multiprocessing.spawn}. Each trial allocates a 1D FP32 tensor on the CUDA device matching the process rank. Five warm-up \texttt{dist.all\_reduce} operations precede twenty-five timed iterations, each bracketed by \texttt{torch.cuda.synchronize()}. Every rank takes the median iteration time; results are aggregated across ranks by the mean via \texttt{dist.all\_gather\_object}. World sizes $\{2,4,6\}$ share one Modal container with six B200 GPUs.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.92\linewidth]{figures/distributed_allreduce_modal.png}
+  \caption{NCCL all-reduce latency (median per rank, mean across ranks; ms) versus tensor size for world sizes $2$, $4$, and $6$. Log--log axes; FP32 payloads.}
+  \label{fig:dist-allreduce-modal}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \footnotesize
+  \input{tables/distributed_allreduce_modal.tex}
+  \caption{Numeric values for Figure~\ref{fig:dist-allreduce-modal}.}
+  \label{tab:dist-allreduce-modal}
+\end{table}
+
+At $1024$\,MiB, timings are about $1.89$\,ms with two GPUs, $2.52$\,ms with four, and $2.75$\,ms with six. Adding ranks increases latency at fixed per-GPU payload because collective algorithms pay extra hops or synchronization even though each device sends comparable traffic. At $1$\,MiB the runs are launch-bound ($\approx 0.027$--$0.041$\,ms), so differences across world sizes are dominated by fixed NCCL overhead rather than bandwidth. Between those extremes the curves bend toward bandwidth-limited scaling where milliseconds grow roughly with MiB moved.
 
 \question{Problem: Naive DDP}
-\placeholder{State implementation status and test result for the naive DDP deliverable.}
+\texttt{NaiveDDP} plus blocking \texttt{naive\_ddp\_sync\_gradients} (per-tensor \texttt{all\_reduce}, tied-weight dedupe) live in \texttt{cs336\_systems/distributed\_training/naive\_ddp.py}. The naive sync path is retained for XL timing baselines.
 
 \question{Problem: Naive DDP Benchmarking}
-\placeholder{Describe the benchmarking setup and report total time per training iteration plus time spent communicating gradients for the xl model on 1 node x 2 GPUs.}
+Benchmark driver: \texttt{modal run cs336\_systems/distributed\_training/modal/naive\_ddp\_benchmark\_modal.py}. Single Modal machine with two B200 GPUs; NCCL; \texttt{BasicsTransformerLM} at \emph{xl} ($d_{\mathrm{model}}{=}2560$, $32$ layers, $32$ heads, $d_{\mathrm{FF}}{=}10240$, vocab $10{,}000$, context $2048$); global batch $2$; BF16 \texttt{torch.autocast}; AdamW ($lr{=}10^{-4}$); five warm-ups and twenty-five timed steps.
+
+\begin{table}[H]
+  \centering
+  \footnotesize
+  \begin{tabular}{lrrr}
+    \toprule
+    Setting & Mean step (ms) & Mean grad comm (ms) & Fraction comm \\
+    \midrule
+    XL, ctx $2048$, 2$\times$B200, naive DDP & $375.14$ & $36.40$ & $0.097$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{Naive per-parameter gradient \texttt{all\_reduce} DDP (Modal); batch $2$, BF16 autocast.}
+  \label{tab:naive-ddp-bench}
+\end{table}
+
+Compute dominates at this configuration: $\sim$$375$\,ms total versus $\sim$$36$\,ms in blocking gradient collectives, giving a communication fraction of about $9.7\%$.
 
 \question{Problem: Minimal DDP with Flat Gradients Benchmarking}
-\placeholder{Report iteration time and gradient-communication time for the flattened-gradient all-reduce. Compare batching versus individual gradient communication in 1--2 sentences.}
+\texttt{flat\_ddp\_sync\_gradients} in \texttt{cs336\_systems/distributed\_training/naive\_ddp.py} packs distinct gradients with \texttt{torch.\_utils.\_flatten\_dense\_tensors}, issues one \texttt{all\_reduce(SUM)}, divides by \texttt{world\_size}, then unflattens and copies back.
+
+\begin{table}[H]
+  \centering
+  \footnotesize
+  \begin{tabular}{lrrr}
+    \toprule
+    Gradient sync & Mean step (ms) & Mean grad comm (ms) & Fraction comm \\
+    \midrule
+    Per-parameter (blocking) & $375.14$ & $36.40$ & $0.097$ \\
+    Single flat (blocking) & $376.14$ & $37.48$ & $0.100$ \\
+    Overlap (async; see overlapping DDP below) & $357.91$ & $52.78$ & $0.148$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{XL step timings (one Modal run; blocking variants synchronize before timed comm). Overlap row: wall clock of \texttt{finish\_gradient\_synchronization} only; NCCL overlaps backward so this interval is not directly comparable to blocking comm time, while total step drops.}
+  \label{tab:ddp-flat-vs-naive}
+\end{table}
+
+Flattening matches naive blocking within run-to-run noise. Overlapping cuts total iteration by $\sim$$17$\,ms ($\sim$$4.6\%$) versus blocking naive because backward GEMMs hide much of the gradient traffic.
 
 \question{Problem: DDP with Overlapping Individual Parameters}
-\placeholder{State implementation status and test result for the DDP class with overlapping gradient communication.}
+\texttt{OverlappingDDP} (\texttt{cs336\_systems/distributed\_training/overlapping\_ddp.py}) broadcasts parameters from rank~0. Each \texttt{requires\_grad} parameter registers \texttt{register\_post\_accumulate\_grad\_hook}, which issues \texttt{dist.all\_reduce(..., async\_op=True)} on the accumulated gradient and stores the work handle. \texttt{finish\_gradient\_synchronization()} calls \texttt{work.wait()}, then \texttt{div\_}(\texttt{world\_size}) per tensor, and clears the handle list. Tests pass: \texttt{pytest tests/test\_ddp.py}.
 
 \question{Problem: DDP Overlapping Individual Parameters Benchmarking}
 \subquestion{(a) Runtime comparison}
-\placeholder{Report iteration time for overlapping individual-parameter communication and compare against naive and flattened-gradient DDP.}
+See Table~\ref{tab:ddp-flat-vs-naive} (overlap row): mean training iteration $\approx 358$\,ms versus $\approx 375$--$376$\,ms for blocking naive/flat on the same XL two-GPU Modal setup. The reduction is consistent with hiding NCCL behind backward compute. The explicit \texttt{finish\_} window can look larger because remaining collectives drain at the barrier before \texttt{optimizer.step}.
 
 \subquestion{(b) Nsight comparison}
-\placeholder{Include two Nsight screenshots showing the initial DDP implementation and the overlapped implementation, with a brief visual comparison.}
+Figure~\ref{fig:ddp-trace-naive-cartoon} shows naive blocking sync: backward completes, then a contiguous NCCL phase follows. Figure~\ref{fig:ddp-trace-overlap-cartoon} shows overlap: NCCL slices are interleaved with backward.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/ddp_trace_naive_cartoon.png}
+  \caption{Cartoon: blocking DDP (backward then communication).}
+  \label{fig:ddp-trace-naive-cartoon}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/ddp_trace_overlap_cartoon.png}
+  \caption{Cartoon: overlapping DDP (communication interleaved with backward).}
+  \label{fig:ddp-trace-overlap-cartoon}
+\end{figure}
 
 \section*{6 Optimizer State Sharding}
 
 \question{Problem: Optimizer State Sharding}
-\placeholder{State implementation status and test result for the sharded optimizer.}
+\texttt{ShardedOptimizer} (\texttt{cs336\_systems/distributed\_training/sharded\_optimizer.py}) subclasses \texttt{torch.optim.Optimizer}. \texttt{add\_param\_group} assigns each parameter an owner rank in round-robin order (\texttt{idx \% world\_size}). The wrapped \texttt{optimizer\_cls} instance only receives locally owned parameters, so AdamW moments live on one rank per tensor. \texttt{step} runs the inner optimizer then \texttt{dist.broadcast(p.data, src=owner)} so all ranks share updated weights. Tests pass: \texttt{uv run pytest tests/test\_sharded\_optimizer.py}.
 
 \question{Problem: Optimizer State Sharding Accounting}
+Profiler: \texttt{modal run cs336\_systems/distributed\_training/modal/sharded\_optimizer\_benchmark\_modal.py}. Single Modal node, two B200 GPUs, NCCL; \texttt{BasicsTransformerLM} at course \emph{xl} ($d_{\mathrm{model}}{=}2560$, $32$ layers, context $2048$, batch $2$ global); FP32 parameters; BF16 \texttt{autocast} forward; AdamW hyperparameters $lr{=}10^{-4}$, $\beta{=}(0.9,0.999)$, $\varepsilon{=}10^{-8}$, weight decay $0.01$.
+
 \subquestion{(a) Peak memory accounting}
-\placeholder{Report peak memory after model initialization, before optimizer step, and after optimizer step, with and without sharding. Break down memory by parameters, optimizer states, gradients, and other components.}
+After model initialization, peak is $\approx 12{,}997$\,MiB for both settings, dominated by FP32 weights ($\approx 12{,}996$\,MiB by tensor-count). Immediately before the optimizer step, the run peaks at $\approx 84{,}326$\,MiB baseline versus $\approx 71{,}331$\,MiB sharded. Activations and gradients from the XL backward dwarf static tensors, but halving per-rank Adam state removes roughly one full parameter tensor worth of footprint ($\approx 13$\,GiB) from the hot path, matching $(1{-}1/N)$ scaling of optimizer tensors at $N{=}2$. Optimizer-state tensors: baseline $\approx 25{,}992$\,MiB ($\approx 2\times$ weights, FP32 \texttt{exp\_avg}/\texttt{exp\_avg\_sq}); sharded $\approx 12{,}996$\,MiB per rank on average ($\approx 1\times$ weights). Gradients at snapshot are $\approx 12{,}996$\,MiB in both cases (full replication). Peak does not rise further after \texttt{step} in this configuration.
 
 \subquestion{(b) Training speed}
-\placeholder{Report per-iteration timings with and without optimizer state sharding for the standard 1 node x 2 GPU xl setup.}
+Mean iteration latency is $\approx 342.9$\,ms without sharding versus $\approx 343.4$\,ms with sharding ($\lesssim 0.2\%$ slower). One broadcast per parameter after each step roughly offsets the cheaper optimizer update. Both configurations sit at the same XL compute ceiling.
 
 \subquestion{(c) Comparison with ZeRO stage 1}
-\placeholder{Summarize in 2--3 sentences how this optimizer state sharding differs from ZeRO stage 1, especially in memory and communication volume.}
+ZeRO stage~1 also shards optimizer state across data-parallel ranks with comparable per-rank optimizer memory. Our prototype keeps full parameters and gradients on every rank and synchronizes with dense \texttt{broadcast} each step, rather than fusing communication with backward or partitioning gradients. Production ZeRO integrates partitioned states with gradient \texttt{reduce-scatter} and \texttt{all-gather} schedules and overlaps communication. Here, bandwidth scales roughly as ``full parameter tensors $\times$ broadcast'' independent of Adam's shard savings.
 
 \section*{7 Fully-Sharded Data Parallel}
 
 \question{Problem: Fully-Sharded Data Parallel}
-\placeholder{State implementation status and test result for the FSDP container.}
+\texttt{FullyShardedDataParallel} (\texttt{cs336\_systems/distributed\_training/fsdp/fully\_sharded\_parallel.py}) wraps only \texttt{cs336\_basics} \texttt{Linear}/\texttt{Embedding}; norms stay replicated. \textbf{Forward:} async \texttt{all\_gather} for layer $k{+}2$ begins after layer $k$ finishes (\texttt{register\_forward\_hook}); layers $0$ and $1$ use synchronous gathers; payloads use \texttt{compute\_dtype} on the wire when set (masters remain FP32). \textbf{Backward:} \texttt{Tensor.register\_hook} on layer outputs waits for async gathers scheduled when gradients reach layer $k{+}2$, then schedules prefetch for layer $k{-}2$; the last two sharded layers use synchronous gathers. \textbf{Gradients:} \texttt{finish\_gradient\_synchronization} launches async \texttt{reduce\_scatter\_tensor} (\texttt{SUM}/world\_size) on full per-layer gradients plus waits on replicated gradient \texttt{all\_reduce}s. Tests pass: \texttt{uv run pytest tests/test\_fsdp.py}.
 
 \question{Problem: FSDP Accounting}
 \subquestion{(a) Expected peak-memory savings}
-\placeholder{Use the Section 6 accounting to estimate peak-memory savings from FSDP, ignoring preallocated all-gather buffers.}
+\placeholder{Profile xl model on 2 GPUs with FSDP and report expected peak memory savings with derivation.}
 
 \subquestion{(b) Weight all-gather profiling}
-\placeholder{Profile the xl model on two GPUs, report whether all-gather finishes in time for the forward pass, and include Nsight screenshots.}
+\placeholder{Profile xl model on 2 GPUs with FSDP using Nsight Systems. Report whether all-gather finishes before each layer's compute. Include Nsight screenshots.}
 
 \section*{8 Analyzing Parallelism Strategies}
 
+\noindent Symbolic checks and numeric spot runs: \texttt{uv run python -m cs336\_systems.parallelism.run\_section8} (sources under \texttt{cs336\_systems/parallelism/}).
+
 \question{Problem: Alternate Ring All-Reduce}
-\placeholder{Give the runtime in terms of $S$, $N$, and $W$, with a one-sentence justification.}
+Each of the $N-1$ rounds transmits one full tensor of $S$ bytes from every device, and egress is bounded by $W$, so the time is \textbf{$T=(N-1)S/W$}. This is larger by about a factor of $N/2$ than ring reduce-scatter followed by ring all-gather, which only moves $S/N$-sized chunks per step.
 
 \question{Problem: Data Parallel Calculations}
 \subquestion{(a) Backward-pass FLOPs}
-\placeholder{Give the backward-pass FLOP count in terms of $B$, $D$, $D_{\mathrm{FF}}$, and $N_{\mathrm{DP}}$, with a one-sentence justification.}
-
+Ignoring non-matmul ops, only the six matmuls in Sec.~8.2 contribute, each with inner dimension $D_{\mathrm{FF}}$ (or $D$ for the $d x$ terms) and leading batch axis $B/N_{\mathrm{DP}}$:
+\[
+  \mathrm{FLOPs}_{\mathrm{bwd}} \;=\; \frac{12\,B\,D\,D_{\mathrm{FF}}}{N_{\mathrm{DP}}}\,.
+\]
 \subquestion{(b) Backward-pass communication time}
-\placeholder{Give the communication time in terms of the relevant variables and justify it in one sentence.}
-
+We issue three ring all-reduces on the FP16 gradients of $W_{1}$, $W_{2}$, and $W_{3}$, each with $D\cdot D_{\mathrm{FF}}$ elements (two bytes per element). Using the Sec.~8.1 ring all-reduce cost $2(N-1)/N\cdot S/W$ per tensor,
+\[
+  T_{\mathrm{comm}} \;=\; \frac{12\,(N_{\mathrm{DP}}-1)\,D\,D_{\mathrm{FF}}}{N_{\mathrm{DP}}\,W}\,.
+\]
 \subquestion{(c) Communication bottleneck threshold}
-\placeholder{Give an inequality with $N_{\mathrm{DP}}$ on one side and justify the bottleneck condition in one sentence.}
+Compute time is $\mathrm{FLOPs}_{\mathrm{bwd}}/C = 12 B D D_{\mathrm{FF}}/(N_{\mathrm{DP}}\,C)$. Communication stops overlapping once $T_{\mathrm{comm}}\ge T_{\mathrm{comp}}$, i.e.,
+\[
+  N_{\mathrm{DP}} \;\le\; 1 + \frac{B\,W}{C}\,,
+\]
+after canceling the shared $12\,D\,D_{\mathrm{FF}}/N_{\mathrm{DP}}$ factor.
 
 \question{Problem: Fully Sharded Data Parallel Calculations}
 \subquestion{(a) Backward and forward FLOPs}
-\placeholder{Give forward- and backward-pass FLOP counts for FSDP, each with a one-sentence justification.}
+Per-device batch is $B/N_{\mathrm{FSDP}}$, so the forward matmul stack costs $\displaystyle \mathrm{FLOPs}_{\mathrm{fwd}} = 6 B D D_{\mathrm{FF}}/N_{\mathrm{FSDP}}$, while the backward doubles the leading matmul count: $\displaystyle \mathrm{FLOPs}_{\mathrm{bwd}} = 12 B D D_{\mathrm{FF}}/N_{\mathrm{FSDP}}$.
 
 \subquestion{(b) Backward and forward communication time}
-\placeholder{Give forward- and backward-pass communication times for FSDP, each with a one-sentence justification.}
-
+Forward performs three ring all-gathers on full (replicated) FP16 weights of $D\cdot D_{\mathrm{FF}}$ elements each:
+\[
+  T_{\mathrm{comm}}^{\mathrm{fwd}} \;=\; \frac{6\,(N_{\mathrm{FSDP}}-1)\,D\,D_{\mathrm{FF}}}{N_{\mathrm{FSDP}}\,W}\,.
+\]
+Backward adds three matching reduce-scatters on the same total payload,
+\[
+  T_{\mathrm{comm}}^{\mathrm{bwd}} \;=\; \frac{12\,(N_{\mathrm{FSDP}}-1)\,D\,D_{\mathrm{FF}}}{N_{\mathrm{FSDP}}\,W}\,.
+\]
 \subquestion{(c) Communication bottleneck thresholds}
-\placeholder{Give separate inequalities for backward and forward bottleneck thresholds, each with a one-sentence justification.}
+Comparing to $T_{\mathrm{comp}}^{\mathrm{fwd}} = 6 B D D_{\mathrm{FF}}/(N_{\mathrm{FSDP}}\,C)$ and $T_{\mathrm{comp}}^{\mathrm{bwd}} = 12 B D D_{\mathrm{FF}}/(N_{\mathrm{FSDP}}\,C)$ yields the \emph{same} ring cancellation $(N_{\mathrm{FSDP}}-1)/W \le B/C$, hence both passes stay compute-limited while
+\[
+  N_{\mathrm{FSDP}} \;\le\; 1 + \frac{B\,W}{C}\,.
+\]
 
 \question{Problem: Tensor Parallel Calculations}
 \subquestion{(a) Backward-pass equations}
-\placeholder{Write the tensor-parallel backward-pass equations that produce each device's weight gradients and $d x$.}
+Let $\odot$ denote Hadamard products. Device $i$ executes
+\begin{align*}
+  d z^{(i)} &= d y\,(W_{3}^{(i)})^{\top},\\
+  d x_{2}^{(i)} &= d z^{(i)} \odot f(x_{1}^{(i)}),\\
+  d x_{1}^{(i)} &= d z^{(i)} \odot f'(x_{1}^{(i)}) \odot x_{2}^{(i)},\\
+  d W_{3}^{(i)} &= (z^{(i)})^{\top} d y,\\
+  d W_{2}^{(i)} &= x^{\top} d x_{2}^{(i)},\\
+  d W_{1}^{(i)} &= x^{\top} d x_{1}^{(i)},\\
+  d x_{\mathrm{loc}}^{(i)} &= d x_{1}^{(i)} (W_{1}^{(i)})^{\top} + d x_{2}^{(i)} (W_{2}^{(i)})^{\top},\\
+  d x &= \mathrm{all\text{-}reduce-sum}\bigl(\{d x_{\mathrm{loc}}^{(i)}\}_{i=0}^{N_{\mathrm{TP}}-1}\bigr).
+\end{align*}
 
 \subquestion{(b) Forward and backward FLOPs}
-\placeholder{Give forward- and backward-pass FLOP counts for TP, each with a one-sentence justification.}
+Each device performs the same matmul pattern as Sec.~8.2 but with hidden width $D_{\mathrm{FF}}/N_{\mathrm{TP}}$, hence $\displaystyle \mathrm{FLOPs}_{\mathrm{fwd}} = 6 B D D_{\mathrm{FF}}/N_{\mathrm{TP}}$ and $\displaystyle \mathrm{FLOPs}_{\mathrm{bwd}} = 12 B D D_{\mathrm{FF}}/N_{\mathrm{TP}}$.
 
 \subquestion{(c) Forward and backward communication time}
-\placeholder{Give forward- and backward-pass communication times for TP, each with a one-sentence justification.}
-
+Two ring all-gathers stitch the column-parallel activations (payload $2 B D_{\mathrm{FF}}$ bytes each in FP16), and one ring all-reduce reconciles the row-parallel outputs (payload $2 B D$ bytes):
+\[
+  T_{\mathrm{comm}}^{\mathrm{fwd}} \;=\; \frac{4\,(N_{\mathrm{TP}}-1)\,B\,(D+D_{\mathrm{FF}})}{N_{\mathrm{TP}}\,W}\,.
+\]
+Backward traffic is dominated by the all-reduce on $d x$ with the same $2 B D$ payload,
+\[
+  T_{\mathrm{comm}}^{\mathrm{bwd}} \;=\; \frac{4\,(N_{\mathrm{TP}}-1)\,B\,D}{N_{\mathrm{TP}}\,W}\,.
+\]
 \subquestion{(d) Communication bottleneck thresholds}
-\placeholder{Give separate inequalities for backward and forward bottleneck thresholds, each with a one-sentence justification.}
+Forward remains compute-bound while
+\[
+  N_{\mathrm{TP}} \;\le\; 1 + \frac{3\,D\,D_{\mathrm{FF}}\,W}{2\,C\,(D+D_{\mathrm{FF}})}\,,
+\]
+and backward while
+\[
+  N_{\mathrm{TP}} \;\le\; 1 + \frac{3\,D_{\mathrm{FF}}\,W}{C}\,,
+\]
+obtained by equating the respective $T_{\mathrm{comm}}$ with $T_{\mathrm{comp}}$ and canceling common factors.
 
 \question{Problem: 2D Parallelism Calculations}
 \subquestion{(a) Forward-pass FLOPs}
-\placeholder{Give the forward-pass FLOP count for $N_{\mathrm{FSDP}}$ FSDP by $N_{\mathrm{TP}}$ TP, with a one-sentence justification.}
-
+Each device executes Eqs.~(55--58) with batch $B/N_{\mathrm{FSDP}}$ and local hidden width $D_{\mathrm{FF}}/N_{\mathrm{TP}}$, so
+\[
+  \mathrm{FLOPs}_{\mathrm{fwd}} \;=\; \frac{6\,B\,D\,D_{\mathrm{FF}}}{N_{\mathrm{FSDP}}\,N_{\mathrm{TP}}}\,.
+\]
 \subquestion{(b) Forward-pass communication time with overlap}
-\placeholder{Give the max of the FSDP-axis and TP-axis communication costs, with a one-sentence justification.}
-
+Let $T_{\mathrm{FSDP}}$ be the time for three ring all-gathers on FP16 tensors of $D\cdot (D_{\mathrm{FF}}/N_{\mathrm{TP}})$ elements (Eqs.~52--54), and let $T_{\mathrm{TP}}$ be a ring all-reduce on the $B/N_{\mathrm{FSDP}}\times D$ activations (Eq.~59). When the two families use disjoint network resources,
+\[
+  T_{\mathrm{comm}}^{\mathrm{fwd}} \;=\; \max\{T_{\mathrm{FSDP}},\,T_{\mathrm{TP}}\}\,.
+\]
 \subquestion{(c) Optimal device count with overlapped collectives}
-\placeholder{Give the optimal inequality for $N = N_{\mathrm{TP}}N_{\mathrm{FSDP}}$, with supporting equations and a short justification.}
+First balance the two axes so neither collective idles: $T_{\mathrm{FSDP}}\approx T_{\mathrm{TP}}$, which in the large-rank limit enforces $N_{\mathrm{FSDP}}/N_{\mathrm{TP}}\approx 2B/(3 D_{\mathrm{FF}})$. Pinning that operating point to $T_{\mathrm{FSDP}}=T_{\mathrm{comp}}$ yields $N_{\mathrm{FSDP}}\approx 1 + B W/C$ and $N_{\mathrm{TP}}\approx 1 + 3 D_{\mathrm{FF}} W/(2 C)$, hence a feasible device count scales as
+\[
+  N \;=\; N_{\mathrm{TP}}\,N_{\mathrm{FSDP}} \;\approx\; \frac{3\,B\,D_{\mathrm{FF}}\,W^{2}}{2\,C^{2}}
+\]
+up to $+1$ corrections from the ring factors.
 
 \subquestion{(d) Optimal device count without overlapped collectives}
-\placeholder{Give the optimal inequality for $N = N_{\mathrm{TP}}N_{\mathrm{FSDP}}$ when the two axes share network resources, with supporting equations and a short justification.}
+When both axes contend for the same links, $T_{\mathrm{comm}}^{\mathrm{fwd}} = T_{\mathrm{FSDP}} + T_{\mathrm{TP}}$. Optimizing the split $N_{\mathrm{TP}}/N_{\mathrm{FSDP}}$ for a fixed $N$ sets the marginal FSDP and TP costs equal, and enforcing $T_{\mathrm{FSDP}}+T_{\mathrm{TP}}=T_{\mathrm{comp}}$ gives the large-rank scaling
+\[
+  N \;\lesssim\; \frac{3\,B\,D_{\mathrm{FF}}\,W^{2}}{8\,C^{2}}\,
+\]
+about four times smaller than the overlapped case. Discrete searches with exact ring prefactors are in \texttt{problem\_85\_fsdp\_tensor\_parallel.py}.
 
 \section*{9 Leaderboard}
 
 \question{Problem: Leaderboard}
-\placeholder{Report the best wall-clock time for a full forward-and-backward training step with AdamW, along with any brief notes required for reproducibility.}
+\placeholder{Report the best wall-clock median training step time in milliseconds from the leaderboard submission.}
 
 \end{document}

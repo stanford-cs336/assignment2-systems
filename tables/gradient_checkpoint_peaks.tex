@@ -1,0 +1,15 @@
+\begin{tabular}{lrr}
+  \toprule
+  Layers per \texttt{checkpoint} chunk & Peak alloc.\ (GiB) & Notes \\
+  \midrule
+  none (vanilla) & $169.86$ & BF16 \texttt{autocast} \\
+  1 & $37.90$ & BF16 \texttt{autocast} \\
+  2 & $42.15$ & BF16 \texttt{autocast} \\
+  4 & $50.67$ & BF16 \texttt{autocast} \\
+  5 & $54.92$ & BF16 \texttt{autocast} \\
+  6 & $59.18$ & BF16 \texttt{autocast} \\
+  8 & $67.69$ & BF16 \texttt{autocast} \\
+  16 & $101.75$ & BF16 \texttt{autocast} \\
+  32 & $169.86$ & BF16 \texttt{autocast} \\
+  \bottomrule
+\end{tabular}
