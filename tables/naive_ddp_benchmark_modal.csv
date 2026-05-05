@@ -1,0 +1,2 @@
+setting,mean_step_ms_rank_mean,mean_grad_comm_ms_rank_mean,frac_time_comm
+xl_ctx2048_bf16_naive_ddp_2gpu_bs2,375.1407,36.4042,0.0970

@@ -17,7 +17,11 @@ dependencies = [
     "pandas>=2",
     "ty>=0.0.29",
     "ruff>=0.15.10",
+    "modal>=1.4.2",
 ]
+
+[project.scripts]
+nsys_profile = "cs336_systems.profiling_benchmarking.nsys_profile:main_cli"
 
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12"]
@@ -52,6 +56,8 @@ line-length = 180
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
+# Triton kernels: scaffolded block pointers are intentional until students implement the loop.
+"cs336_systems/gpu_kernels/flash_attention.py" = ["F841"]
 
 [tool.ruff.lint]
 extend-select = ["UP"]

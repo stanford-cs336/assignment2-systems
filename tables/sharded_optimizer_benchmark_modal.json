@@ -1,0 +1,24 @@
+{
+  "runs": [
+    {
+      "use_sharded": false,
+      "peak_after_init_mb_mean": 12996.572265625,
+      "peak_before_step_mb_mean": 84326.47998046875,
+      "peak_after_step_mb_mean": 84326.47998046875,
+      "mean_iter_ms_mean": 342.8871671669185,
+      "param_mb": 12995.947265625,
+      "grad_mb_snapshot_mean": 12995.947265625,
+      "opt_state_reserved_mb_mean": 25991.895641326904
+    },
+    {
+      "use_sharded": true,
+      "peak_after_init_mb_mean": 12996.572265625,
+      "peak_before_step_mb_mean": 71330.53271484375,
+      "peak_after_step_mb_mean": 71330.53271484375,
+      "mean_iter_ms_mean": 343.36815563729033,
+      "param_mb": 12995.947265625,
+      "grad_mb_snapshot_mean": 12995.947265625,
+      "opt_state_reserved_mb_mean": 12995.947820663452
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+setting,mean_step_ms_rank_mean,mean_grad_comm_ms_rank_mean,frac_time_comm
+xl_ctx2048_bf16_naive_ddp_2gpu_bs2,375.1407,36.4042,0.0970
+xl_ctx2048_bf16_flat_ddp_2gpu_bs2,376.1378,37.4824,0.0997
+xl_ctx2048_bf16_overlap_ddp_2gpu_bs2,357.9147,52.7781,0.1475

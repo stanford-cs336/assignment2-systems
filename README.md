@@ -1,7 +1,7 @@
 # CS336 Spring 2026 Assignment 2: Systems
 
-For a full description of the assignment, see the assignment handout at
-[cs336_assignment2_systems.pdf](./cs336_assignment2_systems.pdf)
+For a full description of the assignment, see the course handout. This repository includes the
+submission write-up as [`writeup.tex`](./writeup.tex) (and `tables/`, `figures/` it references); build PDF locally with `latexmk -pdf writeup.tex` if needed.
 
 If you see any issues with the assignment handout or code, please feel free to
 raise a GitHub issue or open a pull request with a fix.
