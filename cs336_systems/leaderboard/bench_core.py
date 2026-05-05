@@ -1,11 +1,3 @@
-"""§9 leaderboard: one AdamW step on 2×GPU via ``torchrun`` (Modal).
-
-Chunked vocab cross-entropy (no dense ``[batch, T, vocab]`` logits). FSDP + BF16 autocast.
-
-Env: ``LEADERBOARD_GRAD_CKPT`` (default on), ``LEADERBOARD_CE_MICROBATCH``, ``LEADERBOARD_CE_CHUNK``,
-``LEADERBOARD_BENCH_WARMUP``, ``LEADERBOARD_BENCH_REP``, ``LEADERBOARD_RESULT_JSON``.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,20 +38,21 @@ def _datacenter_matmul_tuning() -> None:
         torch.backends.cudnn.benchmark = True
 
 
+def _wrap_block_with_checkpoint(forward_fn):
+    import torch.utils.checkpoint as ckpt
+
+    def checkpointed(x: torch.Tensor) -> torch.Tensor:
+        return ckpt.checkpoint(forward_fn, x, use_reentrant=False)
+
+    return checkpointed
+
+
 def _checkpoint_every_transformer_block(module: BasicsTransformerLM) -> None:
     if not _grad_checkpoint_enabled():
         return
-    import torch.utils.checkpoint as ckpt
-
     for block in module.layers:
-        if not isinstance(block, TransformerBlock):
-            continue
-        forward_orig = block.forward
-
-        def wrapped(x: torch.Tensor, run=forward_orig):
-            return ckpt.checkpoint(run, x, use_reentrant=False)
-
-        block.forward = wrapped  # type: ignore[method-assign]
+        if isinstance(block, TransformerBlock):
+            block.forward = _wrap_block_with_checkpoint(block.forward)  # type: ignore[method-assign]
 
 
 def _fsdp_sharded_unit_index(fsdp: FullyShardedDataParallel, submodule: torch.nn.Module) -> int:
@@ -70,10 +63,10 @@ def _fsdp_sharded_unit_index(fsdp: FullyShardedDataParallel, submodule: torch.nn
 
 
 def _forward_to_ln_final(model: BasicsTransformerLM, token_ids: torch.Tensor) -> torch.Tensor:
-    h = model.token_embeddings(token_ids)
+    hidden = model.token_embeddings(token_ids)
     for block in model.layers:
-        h = block(h)
-    return model.ln_final(h)
+        hidden = block(hidden)
+    return model.ln_final(hidden)
 
 
 def _chunked_ce_loss(
@@ -104,6 +97,11 @@ def _adamw(parameters, **kwargs: Any) -> torch.optim.AdamW:
     raise RuntimeError("AdamW() should always be constructible")
 
 
+def _log_rank0(rank: int, message: str) -> None:
+    if rank == 0:
+        print(f"[leaderboard rank 0] {message}", flush=True)
+
+
 def run_benchmark_after_dist_init(
     *,
     rank: int,
@@ -114,60 +112,55 @@ def run_benchmark_after_dist_init(
 ) -> dict[str, Any] | None:
     install_flash_sdpa()
     _datacenter_matmul_tuning()
-
-    if rank == 0:
-        print(f"[leaderboard rank 0] NCCL rank ready (world_size={world_size})", flush=True)
+    _log_rank0(rank, f"NCCL rank ready (world_size={world_size})")
 
     torch.manual_seed(0)
     if torch.cuda.is_bf16_supported():
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
-    cfg = LEADERBOARD_8B
-    batch_size, vocab_size, seq_len = cfg["batch_size"], cfg["vocab_size"], cfg["context_length"]
+    batch_size = LEADERBOARD_8B["batch_size"]
+    vocab_size = LEADERBOARD_8B["vocab_size"]
+    seq_len = LEADERBOARD_8B["context_length"]
 
-    base = BasicsTransformerLM(**model_kwargs()).to(device=device, dtype=torch.float32)
-    if rank == 0:
-        print("[leaderboard rank 0] model allocated; grad checkpoint …", flush=True)
-    _checkpoint_every_transformer_block(base)
-    model = FullyShardedDataParallel(base, compute_dtype=torch.bfloat16)
-    if rank == 0:
-        print("[leaderboard rank 0] FSDP ready", flush=True)
+    base_model = BasicsTransformerLM(**model_kwargs()).to(device=device, dtype=torch.float32)
+    _log_rank0(rank, "model allocated; applying gradient checkpointing …")
+    _checkpoint_every_transformer_block(base_model)
+    model = FullyShardedDataParallel(base_model, compute_dtype=torch.bfloat16)
+    _log_rank0(rank, "FSDP ready")
 
-    opt = _adamw(model.parameters(), lr=3e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    optimizer = _adamw(model.parameters(), lr=3e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
 
     labels = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
     targets = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
-    micro = _ce_microbatch_size(batch_size)
+    microbatch_size = _ce_microbatch_size(batch_size)
     chunk_rows = _vocab_chunk_rows()
     lm_head_idx = _fsdp_sharded_unit_index(model, model.module.lm_head)
 
     def train_step() -> None:
-        opt.zero_grad(set_to_none=True)
-        for start in range(0, batch_size, micro):
+        optimizer.zero_grad(set_to_none=True)
+        for start in range(0, batch_size, microbatch_size):
             model._reset_prefetch_state()
-            end = min(start + micro, batch_size)
-            lb, tb = labels[start:end], targets[start:end]
+            end = min(start + microbatch_size, batch_size)
+            label_batch = labels[start:end]
+            target_batch = targets[start:end]
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                hidden = _forward_to_ln_final(model.module, lb)
-                loss = _chunked_ce_loss(model, hidden, tb, lm_head_idx=lm_head_idx, chunk_rows=chunk_rows)
+                hidden = _forward_to_ln_final(model.module, label_batch)
+                loss = _chunked_ce_loss(model, hidden, target_batch, lm_head_idx=lm_head_idx, chunk_rows=chunk_rows)
             loss.backward()
         model.finish_gradient_synchronization()
-        opt.step()
+        optimizer.step()
 
+    _log_rank0(rank, "running first train_step (may trigger compilation) …")
     if rank == 0:
-        print("[leaderboard rank 0] first train_step (may compile a long time) …", flush=True)
         torch.cuda.synchronize()
     dist.barrier()
     train_step()
     dist.barrier()
     if rank == 0:
         torch.cuda.synchronize()
-        print("[leaderboard rank 0] warm-up done; triton.testing.do_bench …", flush=True)
+    _log_rank0(rank, f"warm-up done; benchmarking with warmup={bench_warmup} rep={bench_rep}")
 
     import triton.testing
-
-    if rank == 0:
-        print(f"[leaderboard rank 0] do_bench warmup={bench_warmup} rep={bench_rep}", flush=True)
 
     median_ms = float(
         triton.testing.do_bench(
@@ -177,6 +170,7 @@ def run_benchmark_after_dist_init(
             return_mode="median",
         )
     )
+    _log_rank0(rank, f"median_train_step_ms={median_ms:.4f}")
 
     metrics: dict[str, Any] = {
         "median_train_step_ms": median_ms,
@@ -184,8 +178,6 @@ def run_benchmark_after_dist_init(
         "bench_warmup": bench_warmup,
         "bench_rep": bench_rep,
     }
-    if rank == 0:
-        print(f"[leaderboard rank 0] median_train_step_ms={median_ms:.4f}", flush=True)
 
     dist.barrier()
     dist.destroy_process_group()

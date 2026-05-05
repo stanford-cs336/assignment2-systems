@@ -1,12 +1,3 @@
-"""Timeline cartoons for DDP writeup (optional Nsight replacement).
-
-Writes PNGs under ``figures/`` at repo root.
-
-Usage:
-
-    uv run python cs336_systems/distributed_training/modal/gen_ddp_trace_cartoons.py
-"""
-
 from __future__ import annotations
 
 import matplotlib.pyplot as plt

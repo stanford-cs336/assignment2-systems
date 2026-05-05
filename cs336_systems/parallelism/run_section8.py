@@ -1,10 +1,3 @@
-"""Run every §8 analysis script (prints derivations + numeric spot checks).
-
-Usage::
-
-    uv run python -m cs336_systems.parallelism.run_section8
-"""
-
 from __future__ import annotations
 
 from cs336_systems.parallelism import problem_81_alternate_ring_allreduce as p81

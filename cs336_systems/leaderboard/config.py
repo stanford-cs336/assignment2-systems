@@ -1,10 +1,7 @@
-"""Leaderboard model/config matching the assignment §9 spec."""
-
 from __future__ import annotations
 
 import torch
 
-# Assignment §9 (8B-class single-node leaderboard)
 LEADERBOARD_8B: dict = {
     "vocab_size": 151_936,
     "context_length": 32_768,

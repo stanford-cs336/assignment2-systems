@@ -1,5 +1,3 @@
-"""Demonstrate FP16 vs FP32 summation error when adding 0.01 one thousand times (assignment §2)."""
-
 from __future__ import annotations
 
 import torch

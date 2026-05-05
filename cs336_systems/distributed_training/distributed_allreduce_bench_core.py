@@ -1,5 +1,3 @@
-"""NCCL all-reduce microbenchmark worker for ``torch.multiprocessing.spawn`` (used from Modal)."""
-
 from __future__ import annotations
 
 import os

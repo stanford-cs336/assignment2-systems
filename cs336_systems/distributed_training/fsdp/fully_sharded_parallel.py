@@ -14,19 +14,6 @@ _Work = Any
 
 
 class FullyShardedDataParallel(nn.Module):
-    """Shard cs336_basics Linear / Embedding on dim 0; keep norms replicated.
-
-    Forward prefetch: after layer k finishes, start async all_gather for layer k+2
-    (layers 0 and 1 sync-gather). Mixed-precision payloads use compute_dtype on the
-    wire; master shards stay FP32.
-
-    Backward: register_hook on each output waits the async gather for that layer, then
-    prefetches layer idx-2 (last two layers in forward order sync-gather).
-
-    finish_gradient_synchronization: reduce_scatter_tensor (SUM, divide by world size)
-    for sharded layers; async all_reduce for replicated params; wait on all handles.
-    """
-
     _shard_dim = 0
 
     def __init__(self, module: nn.Module, compute_dtype: torch.dtype | None = None):
@@ -59,10 +46,7 @@ class FullyShardedDataParallel(nn.Module):
         for unit_idx, (param_name, mod) in enumerate(shardable_units):
             self._setup_sharded_unit(mod, param_name, unit_idx)
 
-    # --- communication helpers -------------------------------------------------
-
     def _communication_payload(self, shard: torch.Tensor) -> torch.Tensor:
-        """Return the tensor to send over the network (optionally cast to compute_dtype)."""
         tensor = shard.detach()
         return tensor.to(self.compute_dtype) if self.compute_dtype is not None else tensor
 
@@ -71,16 +55,21 @@ class FullyShardedDataParallel(nn.Module):
         if work_handle is not None:
             work_handle.wait()
 
+    def _cancel_pending_work(
+        self,
+        work_list: list[_Work | None],
+        buf_list: list[list[torch.Tensor] | None],
+    ) -> None:
+        for i in range(len(work_list)):
+            self._wait_for_work(work_list[i])
+            work_list[i] = None
+            buf_list[i] = None
+
     def _reset_prefetch_state(self) -> None:
         if self._world_size <= 1:
             return
-        for unit_idx in range(len(self._units)):
-            self._wait_for_work(self._fwd_work[unit_idx])
-            self._fwd_work[unit_idx] = None
-            self._fwd_bufs[unit_idx] = None
-            self._wait_for_work(self._bwd_work[unit_idx])
-            self._bwd_work[unit_idx] = None
-            self._bwd_bufs[unit_idx] = None
+        self._cancel_pending_work(self._fwd_work, self._fwd_bufs)
+        self._cancel_pending_work(self._bwd_work, self._bwd_bufs)
 
     def _sync_all_gather_and_cat(self, shard: torch.Tensor) -> torch.Tensor:
         assert self._process_group is not None
@@ -115,7 +104,6 @@ class FullyShardedDataParallel(nn.Module):
         work_list: list[_Work | None],
         buf_list: list[list[torch.Tensor] | None],
     ) -> torch.Tensor:
-        """Finish async prefetch for unit_idx or fall back to a blocking gather."""
         if force_sync:
             return self._sync_all_gather_and_cat(shard)
         self._wait_for_work(work_list[unit_idx])
@@ -125,8 +113,6 @@ class FullyShardedDataParallel(nn.Module):
         if prefetch_buffers is None:
             return self._sync_all_gather_and_cat(shard)
         return torch.cat(prefetch_buffers, dim=self._shard_dim)
-
-    # --- lifecycle -------------------------------------------------------------
 
     def _make_leaf_from_gathered(self, gathered_tensor: torch.Tensor) -> torch.Tensor:
         return gathered_tensor.float().clone().requires_grad_(True)
@@ -181,13 +167,11 @@ class FullyShardedDataParallel(nn.Module):
         compute_fn: Callable[[torch.Tensor], torch.Tensor],
     ) -> torch.Tensor:
         full_weight_fp32 = mod._fsdp_prepared_full  # type: ignore[attr-defined]
+        mod._fsdp_prepared_full = None  # type: ignore[attr-defined]
         weight = full_weight_fp32.to(self.compute_dtype) if self.compute_dtype is not None else full_weight_fp32
-        try:
-            output = compute_fn(weight)
-            self._register_backward_hook_if_needed(output, unit_idx)
-            return output
-        finally:
-            mod._fsdp_prepared_full = None  # type: ignore[attr-defined]
+        output = compute_fn(weight)
+        self._register_backward_hook_if_needed(output, unit_idx)
+        return output
 
     def _setup_sharded_unit(self, mod: nn.Module, param_name: str, unit_idx: int) -> None:
         weight = mod.weight
@@ -209,39 +193,48 @@ class FullyShardedDataParallel(nn.Module):
         mod.weight = nn.Parameter(shard, requires_grad=weight.requires_grad)
         self._sharded_param_names.add(param_name)
 
-        outer_self = self
-        current_unit_idx = unit_idx
+        captured_unit_idx = unit_idx
 
         if isinstance(mod, Linear):
 
             def forward_linear(x: torch.Tensor, m: nn.Module = mod) -> torch.Tensor:
-                return outer_self._run_forward_with_gathered_weight(
-                    m,
-                    current_unit_idx,
-                    lambda w: einsum(x, w, "... d_in, d_out d_in -> ... d_out"),
-                )
+                def compute_linear(weight: torch.Tensor) -> torch.Tensor:
+                    return einsum(x, weight, "... d_in, d_out d_in -> ... d_out")
+
+                return self._run_forward_with_gathered_weight(m, captured_unit_idx, compute_linear)
 
             mod.forward = forward_linear  # type: ignore[method-assign]
 
         else:
 
             def forward_embedding(ids: torch.Tensor, m: nn.Module = mod) -> torch.Tensor:
-                return outer_self._run_forward_with_gathered_weight(
-                    m, current_unit_idx, lambda w: w[ids]
-                )
+                def compute_embedding(weight: torch.Tensor) -> torch.Tensor:
+                    return weight[ids]
+
+                return self._run_forward_with_gathered_weight(m, captured_unit_idx, compute_embedding)
 
             mod.forward = forward_embedding  # type: ignore[method-assign]
 
-        mod.register_forward_pre_hook(
-            lambda _mod, _inp, i=unit_idx: self._apply_forward_gather(_mod, i)
-        )
-        mod.register_forward_hook(
-            lambda _mod, _inp, _out, i=unit_idx: self._launch_prefetch(i + 2, self._fwd_work, self._fwd_bufs)
-        )
+        def pre_hook(_mod: nn.Module, _inp: Any, i: int = unit_idx) -> None:
+            self._apply_forward_gather(_mod, i)
+
+        def post_hook(_mod: nn.Module, _inp: Any, _out: Any, i: int = unit_idx) -> None:
+            self._launch_prefetch(i + 2, self._fwd_work, self._fwd_bufs)
+
+        mod.register_forward_pre_hook(pre_hook)
+        mod.register_forward_hook(post_hook)
 
     def forward(self, *inputs, **kwargs):
         self._reset_prefetch_state()
         return self.module(*inputs, **kwargs)
+
+    def _collect_full_grad(self, mod: nn.Module) -> torch.Tensor | None:
+        grad_source = getattr(mod, "_fsdp_full_weight_grad_src", None)
+        if grad_source is None or grad_source.grad is None:
+            return None
+        full_grad = grad_source.grad.detach().clone()
+        grad_source.grad = None
+        return full_grad
 
     def finish_gradient_synchronization(self) -> None:
         if not dist.is_initialized():
@@ -251,22 +244,17 @@ class FullyShardedDataParallel(nn.Module):
 
         if self._world_size <= 1:
             for mod in self._units:
-                grad_source = getattr(mod, "_fsdp_full_weight_grad_src", None)
-                if grad_source is None or grad_source.grad is None:
-                    continue
-                mod.weight.grad = grad_source.grad.detach().clone()
-                grad_source.grad = None
+                full_grad = self._collect_full_grad(mod)
+                if full_grad is not None:
+                    mod.weight.grad = full_grad
             return
 
         pending_shards: list[tuple[_Work | None, torch.Tensor, nn.Parameter]] = []
-
         for mod in self._units:
-            grad_source = getattr(mod, "_fsdp_full_weight_grad_src", None)
-            if grad_source is None or grad_source.grad is None:
+            full_grad = self._collect_full_grad(mod)
+            if full_grad is None:
                 continue
             output_shard = torch.empty_like(mod.weight)
-            full_grad = grad_source.grad.detach().clone()
-            grad_source.grad = None
             work_handle = dist.reduce_scatter_tensor(
                 output_shard,
                 full_grad,

@@ -2,20 +2,12 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""§8.2 — data-parallel FFN layer: backward FLOPs, comm time, bottleneck inequality.
-
-Usage::
-
-    uv run python cs336_systems/parallelism/problem_82_data_parallel.py
-"""
-
 from __future__ import annotations
 
 from cs336_systems.parallelism.ring_collectives import fp16_tensor_bytes, ring_all_reduce_seconds
 
 
 def backward_flops(*, batch_size: float, d_model: float, d_ff: float, num_data_parallel_ranks: int) -> float:
-    """Ignore non-matmul ops; local batch is batch_size / num_data_parallel_ranks."""
     local_batch = batch_size / num_data_parallel_ranks
     return 12.0 * local_batch * d_model * d_ff
 
@@ -23,7 +15,6 @@ def backward_flops(*, batch_size: float, d_model: float, d_ff: float, num_data_p
 def backward_comm_seconds(
     *, d_model: float, d_ff: float, num_data_parallel_ranks: float, bandwidth_b_per_s: float
 ) -> float:
-    """Three independent ring all-reduces on FP16 grad tensors of shape (d_model, d_ff) or (d_ff, d_model)."""
     elements_per_weight = d_model * d_ff
     bytes_per_weight = fp16_tensor_bytes(elements_per_weight)
     time_one_allreduce = ring_all_reduce_seconds(
@@ -35,7 +26,6 @@ def backward_comm_seconds(
 
 
 def max_compute_bound_num_ranks(*, batch_size: float, compute_flops_per_s: float, bandwidth_b_per_s: float) -> float:
-    """Largest N_DP where communication time is still less than or equal to compute time (ring AR)."""
     return 1.0 + batch_size * bandwidth_b_per_s / compute_flops_per_s
 
 

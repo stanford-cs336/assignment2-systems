@@ -2,13 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""§8.3 — FSDP: forward/backward FLOPs, comm, bottleneck inequalities.
-
-Usage::
-
-    uv run python cs336_systems/parallelism/problem_83_fsdp.py
-"""
-
 from __future__ import annotations
 
 from cs336_systems.parallelism.ring_collectives import fp16_tensor_bytes, ring_all_gather_seconds, ring_reduce_scatter_seconds
@@ -31,7 +24,6 @@ def _weight_bytes_fp16(d_model: float, d_ff: float) -> float:
 def forward_comm_seconds(
     *, d_model: float, d_ff: float, num_fsdp_ranks: float, bandwidth_b_per_s: float
 ) -> float:
-    """Three all-gathers on full W1, W2, W3 (FP16)."""
     weight_bytes = _weight_bytes_fp16(d_model, d_ff)
     time_one_gather = ring_all_gather_seconds(
         n_ranks=int(num_fsdp_ranks), payload_bytes=weight_bytes, bandwidth_b_per_s=bandwidth_b_per_s
@@ -42,7 +34,6 @@ def forward_comm_seconds(
 def backward_comm_seconds(
     *, d_model: float, d_ff: float, num_fsdp_ranks: float, bandwidth_b_per_s: float
 ) -> float:
-    """Three all-gathers on weights + three reduce-scatters on full grads (same per-tensor size)."""
     weight_bytes = _weight_bytes_fp16(d_model, d_ff)
     time_all_gather = ring_all_gather_seconds(
         n_ranks=int(num_fsdp_ranks), payload_bytes=weight_bytes, bandwidth_b_per_s=bandwidth_b_per_s
@@ -56,7 +47,6 @@ def backward_comm_seconds(
 def max_compute_bound_num_ranks(
     *, batch_size: float, compute_flops_per_s: float, bandwidth_b_per_s: float
 ) -> float:
-    """Same threshold for forward/backward in this model (different prefactors cancel)."""
     return 1.0 + batch_size * bandwidth_b_per_s / compute_flops_per_s
 
 

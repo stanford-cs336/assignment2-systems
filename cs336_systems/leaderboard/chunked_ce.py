@@ -1,5 +1,3 @@
-"""Vocab-chunked cross-entropy for ``hidden @ W.T`` without materializing ``(num_tokens, vocab_size)`` logits."""
-
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -15,8 +13,6 @@ def _vocab_row_slices(vocab_size: int, rows_per_chunk: int) -> Iterator[tuple[in
 
 
 class ChunkedVocabCrossEntropy(torch.autograd.Function):
-    """Sum of per-token CE for logits ``hidden @ W.T``, processing ``W`` in fixed row chunks."""
-
     @staticmethod
     def forward(
         ctx: Any,
@@ -35,7 +31,6 @@ class ChunkedVocabCrossEntropy(torch.autograd.Function):
         if target_token_ids.shape != (num_tokens,):
             raise ValueError("target_token_ids must be 1D with one target per token row")
 
-        # Running log-sum-exp in FP32 (large vocabulary / long sequences).
         max_logit = torch.full((num_tokens,), float("-inf"), device=hidden_states.device, dtype=torch.float32)
         sum_exp = torch.zeros(num_tokens, device=hidden_states.device, dtype=torch.float32)
         logit_at_target = torch.zeros(num_tokens, device=hidden_states.device, dtype=torch.float32)
@@ -43,14 +38,12 @@ class ChunkedVocabCrossEntropy(torch.autograd.Function):
         hidden_fp32 = hidden_states.float()
         for row_begin, row_end in _vocab_row_slices(vocab_size, vocab_chunk_rows):
             weight_chunk = lm_head_weight[row_begin:row_end].float()
-            # train_step uses BF16 autocast; force FP32 logits so they match the buffers above.
             logits_chunk = (hidden_fp32 @ weight_chunk.T).float()
 
             chunk_max_per_row = logits_chunk.max(dim=-1).values
             updated_max = torch.maximum(max_logit, chunk_max_per_row)
-            sum_exp = sum_exp * torch.exp(max_logit - updated_max) + torch.exp(
-                logits_chunk - updated_max.unsqueeze(-1)
-            ).sum(dim=-1)
+            rescale = torch.exp(max_logit - updated_max)
+            sum_exp = sum_exp * rescale + torch.exp(logits_chunk - updated_max.unsqueeze(-1)).sum(dim=-1)
             max_logit = updated_max
 
             target_in_chunk = (target_token_ids >= row_begin) & (target_token_ids < row_end)
@@ -78,7 +71,7 @@ class ChunkedVocabCrossEntropy(torch.autograd.Function):
         num_tokens, model_dim = hidden_states.shape
         vocab_size, _ = lm_head_weight.shape
 
-        loss_scale = grad_output.reshape(()).to(dtype=torch.float32)
+        loss_scale = float(grad_output)
         grad_hidden = torch.zeros(num_tokens, model_dim, device=hidden_states.device, dtype=torch.float32)
         grad_weight = torch.zeros_like(lm_head_weight, dtype=torch.float32)
 
@@ -110,7 +103,6 @@ def chunked_lm_head_cross_entropy_loss(
     target_token_ids: torch.Tensor,
     vocab_chunk_rows: int,
 ) -> torch.Tensor:
-    """Cross-entropy for ``[batch, seq, d]`` hidden states and full ``[vocab, d]`` LM head weight."""
     batch, seq_len, _ = hidden_states.shape
     flat_hidden = hidden_states.reshape(batch * seq_len, -1)
     flat_targets = target_token_ids.reshape(-1).long()

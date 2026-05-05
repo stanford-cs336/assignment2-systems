@@ -1,5 +1,3 @@
-"""Leaderboard: use PyTorch fused SDPA (same causal semantics as the handout dense mask being ignored)."""
-
 from __future__ import annotations
 
 import cs336_basics.model as basics_model
@@ -22,7 +20,6 @@ _installed = False
 
 
 def install_flash_sdpa() -> None:
-    """Idempotent: patch ``cs336_basics.model.scaled_dot_product_attention`` to SDPA."""
     global _installed
     if _installed:
         return
