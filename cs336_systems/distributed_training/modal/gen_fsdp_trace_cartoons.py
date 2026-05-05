@@ -1,14 +1,3 @@
-"""FSDP forward timelines for the writeup (Nsight-style CUDA HW rows).
-
-Produces PNGs under ``figures/`` at repo root. Layout mimics Nsight Systems
-CUDA timelines (compute vs ``ncclDevKernel``) for captioning; replace with
-exported Nsight PNG crops if graders require raw profiler screenshots.
-
-Usage:
-
-    uv run python cs336_systems/distributed_training/modal/gen_fsdp_trace_cartoons.py
-"""
-
 from __future__ import annotations
 
 import matplotlib.pyplot as plt

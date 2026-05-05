@@ -1,5 +1,3 @@
-"""DDP with async gradient ``all_reduce`` overlapping backward (per-parameter hooks)."""
-
 from __future__ import annotations
 
 from typing import Any

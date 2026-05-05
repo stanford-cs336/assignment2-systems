@@ -1,9 +1,3 @@
-"""
-Measures per-operation saved-for-backward memory in a single xl TransformerBlock
-using PyTorch's saved_tensors_hooks API.
-
-Run with:  modal run cs336_systems/single_gpu_memory/block_memory_attribution.py
-"""
 import gc
 from collections import defaultdict
 from pathlib import Path
@@ -22,7 +16,6 @@ BATCH = 4
 
 
 def measure_block_saved_tensors() -> list[tuple[str, int]]:
-    """Returns (grad_fn_type, bytes) for every tensor saved for backward."""
     block = TransformerBlock(
         d_model=D_MODEL,
         d_ff=D_FF,
@@ -66,14 +59,14 @@ def print_report(saves: list[tuple[str, int]]) -> None:
         by_op[name] += size
 
     ranked = sorted(by_op.items(), key=lambda kv: kv[1], reverse=True)
-    mib = 1024 ** 2
+    bytes_per_mib = 1024 ** 2
 
-    print(f"Total saved for backward: {total / mib:.2f} MiB  ({len(saves)} individual saves)")
+    print(f"Total saved for backward: {total / bytes_per_mib:.2f} MiB  ({len(saves)} individual saves)")
     print()
     print(f"{'Grad-fn / leaf type':<48} {'MiB':>8}  {'%':>6}")
     print("-" * 68)
     for name, size in ranked[:15]:
-        print(f"{name:<48} {size / mib:>8.1f}  {100 * size / total:>5.1f}%")
+        print(f"{name:<48} {size / bytes_per_mib:>8.1f}  {100 * size / total:>5.1f}%")
 
 
 @app.local_entrypoint()

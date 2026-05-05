@@ -1,5 +1,3 @@
-"""Time ``BasicsTransformerLM`` forward (``f``), + backward (``fb``), or + AdamW (``fbo``) on Modal."""
-
 from __future__ import annotations
 
 import gc
@@ -89,7 +87,6 @@ def run_step(
         else nullcontext()
     )
 
-    # Forward-only: no autograd graph (matches inference-style timing).
     if method == "f":
         with torch.inference_mode():
             with autocast_cm:

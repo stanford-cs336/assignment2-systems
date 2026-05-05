@@ -32,30 +32,29 @@ class CheckpointedBasicsTransformerLM(BasicsTransformerLM):
         self.segment_blocks = segment_blocks
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        embedded_tokens = self.token_embeddings(x)
-        h = embedded_tokens
+        hidden = self.token_embeddings(x)
 
         if self.segment_blocks is None:
             for layer in self.layers:
-                h = layer(h)
+                hidden = layer(hidden)
         else:
-            k = self.segment_blocks
+            layers_per_chunk = self.segment_blocks
             layers_list = list(self.layers)
-            if k < 1:
+            if layers_per_chunk < 1:
                 raise ValueError("segment_blocks must be >= 1")
-            for start in range(0, len(layers_list), k):
-                chunk_layers = layers_list[start : start + k]
+            for start in range(0, len(layers_list), layers_per_chunk):
+                chunk_layers = layers_list[start : start + layers_per_chunk]
 
                 def run_chunk(inp: torch.Tensor, chunk_layers: tuple[nn.Module, ...] = tuple(chunk_layers)) -> torch.Tensor:
-                    out = inp
+                    result = inp
                     for layer in chunk_layers:
-                        out = layer(out)
-                    return out
+                        result = layer(result)
+                    return result
 
-                h = checkpoint(run_chunk, h, use_reentrant=False)
+                hidden = checkpoint(run_chunk, hidden, use_reentrant=False)
 
-        h = self.ln_final(h)
-        logits = self.lm_head(h)
+        hidden = self.ln_final(hidden)
+        logits = self.lm_head(hidden)
         return logits
 
 
@@ -89,16 +88,16 @@ def one_step_peak_mib(
 ) -> float | None:
     model.train()
     optimizer = torch.optim.AdamW(model.parameters())
-    amp = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_bf16_autocast else nullcontext()
+    autocast_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_bf16_autocast else nullcontext()
     try:
         optimizer.zero_grad(set_to_none=True)
-        with amp:
+        with autocast_context:
             logits = model(batch)
             loss = logits.mean()
         loss.backward()
         torch.cuda.synchronize()
-        peak_bytes = torch.cuda.max_memory_allocated()
-        return peak_bytes / (1024**3)
+        peak_allocated_bytes = torch.cuda.max_memory_allocated()
+        return peak_allocated_bytes / (1024**3)
     except torch.cuda.OutOfMemoryError:
         torch.cuda.synchronize()
         return None
@@ -137,16 +136,16 @@ def sweep_segment_sizes(
         context_length=XL_CONFIG["context_length"],
     ).cuda()
 
-    for seg in segment_sizes:
+    for segment_size in segment_sizes:
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-        label = "none (vanilla)" if seg is None else str(seg)
-        if seg is None:
+        label = "none (vanilla)" if segment_size is None else str(segment_size)
+        if segment_size is None:
             model = BasicsTransformerLM(**XL_CONFIG).cuda().to(torch.float32)
         else:
-            model = CheckpointedBasicsTransformerLM(**XL_CONFIG, segment_blocks=seg).cuda().to(torch.float32)
+            model = CheckpointedBasicsTransformerLM(**XL_CONFIG, segment_blocks=segment_size).cuda().to(torch.float32)
 
         peak_gib = warmup_and_measure(model, batch, warmup_steps=warmup_steps, use_bf16_autocast=use_bf16_autocast)
         rows.append((label, peak_gib))
@@ -198,7 +197,7 @@ def main():
 
 
 def argparse_main() -> None:
-    parser = argparse.ArgumentParser(description="Gradient checkpointing peak-memory sweep for XL transformer.")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--warmup-steps", type=int, default=2)
     parser.add_argument("--fp32-matmuls", action="store_true", help="Disable BF16 autocast (may OOM at batch 4, ctx 2048).")
     args = parser.parse_args()

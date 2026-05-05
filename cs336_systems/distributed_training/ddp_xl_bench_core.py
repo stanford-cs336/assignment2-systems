@@ -1,5 +1,3 @@
-"""XL DDP timing worker for torch.multiprocessing.spawn (naive / flat / overlapping sync)."""
-
 from __future__ import annotations
 
 import os

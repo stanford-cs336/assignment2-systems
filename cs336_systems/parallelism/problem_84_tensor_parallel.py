@@ -2,20 +2,12 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""§8.4 — tensor-parallel FFN (column W1/W2, row W3): backward equations + costs.
-
-Usage::
-
-    uv run python cs336_systems/parallelism/problem_84_tensor_parallel.py
-"""
-
 from __future__ import annotations
 
 from cs336_systems.parallelism.ring_collectives import ring_all_gather_seconds, ring_all_reduce_seconds
 
 
 def forward_flops(*, batch_size: float, d_model: float, d_ff: float, num_tp_ranks: int) -> float:
-    """Per-device forward matmul FLOPs."""
     return 6.0 * batch_size * d_model * d_ff / num_tp_ranks
 
 
@@ -26,7 +18,6 @@ def backward_flops(*, batch_size: float, d_model: float, d_ff: float, num_tp_ran
 def forward_comm_seconds(
     *, batch_size: float, d_model: float, d_ff: float, num_tp_ranks: int, bandwidth_b_per_s: float
 ) -> float:
-    """Two ring all-gathers on concat of column shards (activations) + one AR on output."""
     activation_bytes = 2.0 * batch_size * d_ff
     time_all_gather = ring_all_gather_seconds(
         n_ranks=num_tp_ranks, payload_bytes=activation_bytes, bandwidth_b_per_s=bandwidth_b_per_s
@@ -41,7 +32,6 @@ def forward_comm_seconds(
 def backward_comm_seconds(
     *, batch_size: float, d_model: float, num_tp_ranks: int, bandwidth_b_per_s: float
 ) -> float:
-    """One ring all-reduce on dx of shape (B,D) (sum TP contributions); dW shards local."""
     input_grad_bytes = 2.0 * batch_size * d_model
     return ring_all_reduce_seconds(
         n_ranks=num_tp_ranks, payload_bytes=input_grad_bytes, bandwidth_b_per_s=bandwidth_b_per_s
@@ -49,7 +39,6 @@ def backward_comm_seconds(
 
 
 def max_tp_ranks_forward(*, d_model: float, d_ff: float, compute_flops_per_s: float, bandwidth_b_per_s: float) -> float:
-    """T_fwd_comm <= T_fwd_comp with equal B scaling cancelled."""
     return 1.0 + (3.0 * d_model * d_ff * bandwidth_b_per_s) / (2.0 * compute_flops_per_s * (d_model + d_ff))
 
 

@@ -1,18 +1,3 @@
-"""Invoke the **deployed** §9 leaderboard Modal function.
-
-Deploy once (or after you change code bundled into the image):
-
-    uv run modal deploy -m cs336_systems.leaderboard.modal_leaderboard_benchmark
-
-Then from any machine with Modal credentials (``modal token new`` / ``MODAL_TOKEN_*``):
-
-    uv run python -m cs336_systems.leaderboard.invoke_deployed
-    uv run python -m cs336_systems.leaderboard.invoke_deployed --no-wait
-
-This uses :func:`modal.Function.from_name` — it does **not** re-upload ``cs336_systems`` via
-``add_local_dir``; the container runs whatever version was last deployed.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -27,7 +12,7 @@ from cs336_systems.leaderboard.modal_leaderboard_benchmark import (
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Call deployed run_leaderboard_remote on Modal.")
+    p = argparse.ArgumentParser()
     p.add_argument("--bench-warmup", type=int, default=25)
     p.add_argument("--bench-rep", type=int, default=80)
     p.add_argument("--no-grad-ckpt", action="store_true", help="Disable per-block activation checkpointing.")

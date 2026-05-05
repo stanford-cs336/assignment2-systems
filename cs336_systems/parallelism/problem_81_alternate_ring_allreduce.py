@@ -2,13 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""§8.1 — alternate ring all-reduce time (idealized full-tensor exchanges).
-
-Usage::
-
-    uv run python cs336_systems/parallelism/problem_81_alternate_ring_allreduce.py
-"""
-
 from __future__ import annotations
 
 from cs336_systems.parallelism.ring_collectives import alternate_ring_allreduce_seconds, ring_all_reduce_seconds

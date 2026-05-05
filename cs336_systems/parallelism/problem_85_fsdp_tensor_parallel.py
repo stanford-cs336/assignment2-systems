@@ -2,13 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""§8.5 — 2D FSDP × TP: forward FLOPs, overlapped vs serial comm, device caps.
-
-Usage::
-
-    uv run python cs336_systems/parallelism/problem_85_fsdp_tensor_parallel.py
-"""
-
 from __future__ import annotations
 
 from cs336_systems.parallelism.ring_collectives import ring_all_gather_seconds, ring_all_reduce_seconds
@@ -23,7 +16,6 @@ def forward_flops(
 def fsdp_forward_gather_time(
     *, d_model: float, d_ff: float, num_fsdp_ranks: int, num_tp_ranks: int, bandwidth_b_per_s: float
 ) -> float:
-    """Three ring all-gathers per §8.5; each unshards the FSDP axis on a D×(D_FF/N_TP)-style tensor."""
     num_elements = d_model * (d_ff / num_tp_ranks)
     payload_bytes = 2.0 * num_elements
     time_one_gather = ring_all_gather_seconds(
@@ -35,7 +27,6 @@ def fsdp_forward_gather_time(
 def tp_forward_allreduce_time(
     *, batch_size: float, d_model: float, num_fsdp_ranks: int, num_tp_ranks: int, bandwidth_b_per_s: float
 ) -> float:
-    """All-reduce on the local output activation with shape (B/N_FSDP, D)."""
     payload_bytes = 2.0 * (batch_size / num_fsdp_ranks) * d_model
     return ring_all_reduce_seconds(
         n_ranks=num_tp_ranks, payload_bytes=payload_bytes, bandwidth_b_per_s=bandwidth_b_per_s
@@ -45,14 +36,12 @@ def tp_forward_allreduce_time(
 def overlapped_max_total_ranks(
     *, batch_size: float, d_ff: float, compute_flops_per_s: float, bandwidth_b_per_s: float
 ) -> float:
-    """Balanced axes, then T_FSDP = T_comp pins N_FSDP ≈ B W / C and N_TP ≈ 3 D_FF W / (2 C)."""
     return 1.5 * batch_size * d_ff * bandwidth_b_per_s * bandwidth_b_per_s / (compute_flops_per_s * compute_flops_per_s)
 
 
 def serial_max_total_ranks(
     *, batch_size: float, d_ff: float, compute_flops_per_s: float, bandwidth_b_per_s: float
 ) -> float:
-    """Large-rank optimum with T_FSDP = T_T and T_FSDP + T_T = T_comp → N ≈ 3 B D_FF W² / (8 C²)."""
     return 0.375 * batch_size * d_ff * bandwidth_b_per_s * bandwidth_b_per_s / (compute_flops_per_s * compute_flops_per_s)
 
 
@@ -78,7 +67,6 @@ def search_max_product_serial(
     *, batch_size: float, d_model: float, d_ff: float, compute_flops_per_s: float, bandwidth_b_per_s: float,
     grid_max: int = 256
 ):
-    """Brute-force grid with both axes >= 2 so ring collectives are non-degenerate."""
     best_product = 0
     best_num_fsdp = 0
     best_num_tp = 0
@@ -98,7 +86,6 @@ def search_max_product_serial(
 
 
 def main() -> None:
-    # Slower accelerator in the demo so serial grid search finds non-trivial (N_FSDP, N_TP) pairs.
     d_model = 4096.0
     d_ff = 16384.0
     batch_size = 256.0

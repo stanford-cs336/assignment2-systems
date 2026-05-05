@@ -100,19 +100,19 @@ def main():
     precisions = (True, False)  # BF16 first: FP32 OOM poisons the allocator for subsequent BF16 runs
 
     peak_rows: list[dict[str, str | int | float]] = []
-    mib = 1024**2
+    bytes_per_mib = 1024**2
 
     for ctx in context_lengths:
         for method in methods:
             for use_bf16 in precisions:
-                bs = _batch_size(ctx, method)
-                tag = _tag(ctx, method, use_bf16, bs)
-                print(f"Memory snapshot: {tag} (batch={bs}, warmup={WARMUP_STEPS})")
+                batch_size = _batch_size(ctx, method)
+                tag = _tag(ctx, method, use_bf16, batch_size)
+                print(f"Memory snapshot: {tag} (batch={batch_size}, warmup={WARMUP_STEPS})")
                 cfg = _xl_config(ctx)
                 pickle_path = OUTPUT_DIR / f"{tag}.pickle"
                 row = {
                     "context_length": ctx,
-                    "batch_size": bs,
+                    "batch_size": batch_size,
                     "method": method,
                     "bf16_autocast": int(use_bf16),
                     "peak_allocated_mib": "",
@@ -123,14 +123,14 @@ def main():
                 try:
                     snapshot_bytes, peak_alloc, peak_reserved = run_memory_snapshot_remote.remote(
                         cfg,
-                        bs,
+                        batch_size,
                         method,
                         WARMUP_STEPS,
                         use_bf16,
                     )
                     pickle_path.write_bytes(snapshot_bytes)
-                    row["peak_allocated_mib"] = f"{peak_alloc / mib:.4f}"
-                    row["peak_reserved_mib"] = f"{peak_reserved / mib:.4f}"
+                    row["peak_allocated_mib"] = f"{peak_alloc / bytes_per_mib:.4f}"
+                    row["peak_reserved_mib"] = f"{peak_reserved / bytes_per_mib:.4f}"
                 except Exception as exc:
                     row["error"] = f"{type(exc).__name__}: {exc}"
                     print(f"FAILED {tag}: {row['error']}")

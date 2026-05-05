@@ -1,5 +1,3 @@
-"""Minimal DDP wrapper: broadcast weights from rank 0; blocking gradient ``all_reduce`` helpers."""
-
 from __future__ import annotations
 
 import torch
@@ -21,18 +19,17 @@ class NaiveDDP(nn.Module):
 
 
 def _gradients_to_sync(module: nn.Module) -> list[torch.Tensor]:
-    """One entry per parameter with a grad; duplicate parameter ids (tied weights) skipped."""
-    seen: set[int] = set()
-    out: list[torch.Tensor] = []
+    seen_param_ids: set[int] = set()
+    grads: list[torch.Tensor] = []
     for parameter in module.parameters():
         if not parameter.requires_grad or parameter.grad is None:
             continue
-        pid = id(parameter)
-        if pid in seen:
+        param_id = id(parameter)
+        if param_id in seen_param_ids:
             continue
-        seen.add(pid)
-        out.append(parameter.grad)
-    return out
+        seen_param_ids.add(param_id)
+        grads.append(parameter.grad)
+    return grads
 
 
 def naive_ddp_sync_gradients(module: nn.Module) -> None:

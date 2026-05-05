@@ -1,5 +1,3 @@
-"""XL AdamW baseline vs ShardedOptimizer — peak memory snapshots + mean iteration time (NCCL spawn worker)."""
-
 from __future__ import annotations
 
 import os
