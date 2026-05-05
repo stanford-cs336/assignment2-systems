@@ -371,10 +371,34 @@ ZeRO stage~1 also shards optimizer state across data-parallel ranks with compara
 
 \question{Problem: FSDP Accounting}
 \subquestion{(a) Expected peak-memory savings}
-\placeholder{Profile xl model on 2 GPUs with FSDP and report expected peak memory savings with derivation.}
+\texttt{FullyShardedDataParallel} shards every \texttt{cs336\_basics} \texttt{Linear} and \texttt{Embedding} weight along dimension~$0$ across $N{=}2$ ranks, while \texttt{RMSNorm} parameters stay replicated. For the course \emph{xl} \texttt{BasicsTransformerLM} ($d_{\mathrm{model}}{=}2560$, $d_{\mathrm{FF}}{=}10240$, $32$ layers, vocab $10{,}000$), the vast majority of parameters live in blocks and the LM head, with a smaller replicated contribution from norm scales.
+
+Let $P_{\mathrm{shard}}$ denote the total parameter count in sharded modules and $P_{\mathrm{repl}}$ the replicated count. A naive data-parallel replica stores $(P_{\mathrm{shard}}+P_{\mathrm{repl}})$ FP32 parameter tensors on \emph{each} GPU (ignoring optimizer state for the moment). FSDP stores $(P_{\mathrm{shard}}/N + P_{\mathrm{repl}})$ per rank, so static parameter HBM drops by approximately
+\[
+  \Delta_{\mathrm{stat}} \;\approx\; \Bigl(1 - \frac{1}{N}\Bigr)\,P_{\mathrm{shard}}\,s_{\mathrm{p}},
+\]
+where $s_{\mathrm{p}}{=}4$\,bytes for FP32 masters. With $N{=}2$ this is roughly half of the sharded parameter footprint per rank versus DDP.
+
+This is only a \emph{lower bound} on what matters for peak: the forward pass \texttt{all\_gather}s each weight into a full-width FP32 leaf (\texttt{\_make\_leaf\_from\_gathered}) for matmul, and the implementation prefetches the next layer while the current one computes. So transient peak includes at least one (often two) full gathered tensors in flight. At short-to-medium context, those gathers can dominate the peak story; at long context with dense attention, Table~\ref{tab:memory-peaks} and Sec.~2 already show activation storage can dominate, diluting the benefit of sharding on end-to-end peak \texttt{max\_memory\_allocated}. Qualitatively, FSDP trades repeated small static shards for layered transient gathers---helpful when weights are large relative to activations, which is the regime targeted by the assignment leaderboard.
 
 \subquestion{(b) Weight all-gather profiling}
-\placeholder{Profile xl model on 2 GPUs with FSDP using Nsight Systems. Report whether all-gather finishes before each layer's compute. Include Nsight screenshots.}
+Nsight timelines were captured for the \emph{xl} model wrapped in course FSDP on two GPUs, focusing on the embedding/first linear units (where the hand implementation forces synchronous \texttt{all\_gather}) versus a deeper linear later in the stack (where async prefetch can overlap).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fsdp_nsys_early_layers.png}
+  \caption{Nsight excerpt (early sharded layers): synchronous weight \texttt{all\_gather} completes before the dependent GEMM kernel starts. Layers~$0$ and $1$ use blocking gathers in our FSDP.}
+  \label{fig:fsdp-nsys-early}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fsdp_nsys_deep_layers.png}
+  \caption{Nsight excerpt (deeper layers): communication from prefetched \texttt{all\_gather} overlaps with compute from earlier layers; the gather for layer $k{+}2$ is launched after layer $k$ finishes (forward hook), so the critical path often shows GEMM starting shortly after the tail of the preceding layer rather than a long idle.}
+  \label{fig:fsdp-nsys-deep}
+\end{figure}
+
+Early layers (Figure~\ref{fig:fsdp-nsys-early}) match the intended ``gather completes, then matmul'' ordering enforced for numerical stability. Deeper layers (Figure~\ref{fig:fsdp-nsys-deep}) illustrate overlap: NCCL \texttt{all\_gather} segments run concurrently with unrelated kernels from upstream work, so weight collection is often hidden until the consumer layer is ready.
 
 \section*{8 Analyzing Parallelism Strategies}
 
@@ -485,6 +509,21 @@ about four times smaller than the overlapped case. Discrete searches with exact 
 \section*{9 Leaderboard}
 
 \question{Problem: Leaderboard}
-\placeholder{Report the best wall-clock median training step time in milliseconds from the leaderboard submission.}
+The leaderboard entry benchmarks one full AdamW training step on \textbf{two NVIDIA B200 GPUs} using the assignment §9 ``8B-class'' configuration in \newline\texttt{cs336\_systems/leaderboard/config.py}: batch size $2$, context $32{,}768$, vocabulary $151{,}936$, $d_{\mathrm{model}}{=}4096$, $d_{\mathrm{FF}}{=}11{,}008$, $34$ transformer layers, and $32$ heads. The timed body is implemented in \texttt{cs336\_systems/leaderboard/bench\_core.py}: NCCL initialized via \texttt{torchrun --standalone --nproc\_per\_node=2}, \texttt{BasicsTransformerLM} in FP32 with \texttt{torch.autocast(..., dtype=torch.bfloat16)} around the microbatched forward/backward, course \texttt{FullyShardedDataParallel(compute\_dtype=torch.bfloat16)}, and AdamW (\texttt{fused=True} with \texttt{foreach}/vanilla fallbacks).
+
+\textbf{Memory:} Per-block \texttt{torch.utils.checkpoint} stays enabled (\texttt{LEADERBOARD\_GRAD\_CKPT=1}). Without it, storing full activations for $B{=}2$, $T{=}32\mathrm{k}$, and $34$ layers exhausts $\sim$178\,GiB per device before the LM head; checkpointing trades recomputation for a feasible resident footprint.
+
+\textbf{Throughput:} Attention uses PyTorch \texttt{scaled\_dot\_product\_attention} (fused backends): the leaderboard entry patches \texttt{cs336\_basics.model.scaled\_dot\_product\_attention} accordingly (not the course Triton FlashAttention-2 path), prioritizing wall clock. The LM head does not materialize logits of shape $[B,T,V]$: chunked vocab cross-entropy (\texttt{cs336\_systems/leaderboard/chunked\_ce.py}) applies the FSDP-gathered head weight in row chunks with an online log-sum-exp; softmax statistics stay in FP32 with explicit FP32 chunk logits under autocast.
+
+\textbf{Timing:} After a synchronized warm-up step, the reported metric is the median wall-clock milliseconds from rank~0 via\linebreak \texttt{triton.testing.do\_bench} on \texttt{train\_step}, with \texttt{warmup=25}, \texttt{rep=80}, and \texttt{return\_mode="median"}. Peak memory is \texttt{torch.cuda.max\_memory\_allocated()} on rank~0 after the benchmark. The run was executed on \textbf{Modal} (\texttt{modal\_leaderboard\_benchmark.py} deploying \texttt{cs336\_systems} and \texttt{cs336-basics} into the container).
+
+\begin{table}[H]
+  \centering
+  \input{tables/leaderboard_8b_modal.tex}
+  \caption{Best §9 leaderboard timing (Modal, $2\times$B200; SDPA attention + chunked LM+CE, grad checkpoint on).}
+  \label{tab:leaderboard-8b}
+\end{table}
+
+The median step time is $\mathbf{7979.43}$\,\textbf{ms} ($\approx 7.98$\,s), under the $10$\,s target, with peak allocated memory $\approx 124.1$\,GiB per rank. The dominant remaining time is end-to-end transformer compute (long context, wide matrices) plus FSDP communication; eliminating the $[B,T,V]$ dense logits tensor lowers peak and allocator pressure but does not remove the $O(B\,T\,d)$ activation checkpoint/recompute path for the trunk.
 
 \end{document}
