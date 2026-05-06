@@ -539,21 +539,15 @@ about four times smaller than the overlapped case. Discrete searches with exact 
 \section*{9 Leaderboard}
 
 \question{Problem: Leaderboard}
-The leaderboard entry benchmarks one full AdamW training step on \textbf{two NVIDIA B200 GPUs} using the assignment §9 ``8B-class'' configuration in \newline\texttt{cs336\_systems/leaderboard/config.py}: batch size $2$, context $32{,}768$, vocabulary $151{,}936$, $d_{\mathrm{model}}{=}4096$, $d_{\mathrm{FF}}{=}11{,}008$, $34$ transformer layers, and $32$ heads. The timed body is implemented in \texttt{cs336\_systems/leaderboard/bench\_core.py}: NCCL initialized via \texttt{torchrun --standalone --nproc\_per\_node=2}, \texttt{BasicsTransformerLM} in FP32 with \texttt{torch.autocast(..., dtype=torch.bfloat16)} around the microbatched forward/backward, course \texttt{FullyShardedDataParallel(compute\_dtype=torch.bfloat16)}, and AdamW (\texttt{fused=True} with \texttt{foreach}/vanilla fallbacks).
-
-\textbf{Memory:} Per-block \texttt{torch.utils.checkpoint} stays enabled (\texttt{LEADERBOARD\_GRAD\_CKPT=1}). Without it, storing full activations for $B{=}2$, $T{=}32\mathrm{k}$, and $34$ layers exhausts $\sim$178\,GiB per device before the LM head; checkpointing trades recomputation for a feasible resident footprint.
-
-\textbf{Throughput:} Attention uses PyTorch \texttt{scaled\_dot\_product\_attention} (fused backends): the leaderboard entry patches \texttt{cs336\_basics.model.scaled\_dot\_product\_attention} accordingly (not the course Triton FlashAttention-2 path), prioritizing wall clock. The LM head does not materialize logits of shape $[B,T,V]$: chunked vocab cross-entropy (\texttt{cs336\_systems/leaderboard/chunked\_ce.py}) applies the FSDP-gathered head weight in row chunks with an online log-sum-exp; softmax statistics stay in FP32 with explicit FP32 chunk logits under autocast.
-
-\textbf{Timing:} After a synchronized warm-up step, the reported metric is the median wall-clock milliseconds from rank~0 via\linebreak \texttt{triton.testing.do\_bench} on \texttt{train\_step}, with \texttt{warmup=25}, \texttt{rep=80}, and \texttt{return\_mode="median"}. Peak memory is \texttt{torch.cuda.max\_memory\_allocated()} on rank~0 after the benchmark. The run was executed on \textbf{Modal} (\texttt{modal\_leaderboard\_benchmark.py} deploying \texttt{cs336\_systems} and \texttt{cs336-basics} into the container).
+Two NVIDIA B200 GPUs (Modal), assignment 8B-class config. Key techniques: course \texttt{FullyShardedDataParallel} with \texttt{compute\_dtype=bfloat16}, per-block gradient checkpointing, PyTorch \texttt{scaled\_dot\_product\_attention}, and chunked vocab cross-entropy to avoid materializing $[B,T,V]$ logits.
 
 \begin{table}[H]
   \centering
   \input{tables/leaderboard_8b_modal.tex}
-  \caption{Best §9 leaderboard timing (Modal, $2\times$B200; SDPA attention + chunked LM+CE, grad checkpoint on).}
+  \caption{Best leaderboard timing ($2\times$B200, Modal).}
   \label{tab:leaderboard-8b}
 \end{table}
 
-The median step time is $\mathbf{7979.43}$\,\textbf{ms} ($\approx 7.98$\,s), under the $10$\,s target, with peak allocated memory $\approx 124.1$\,GiB per rank. The dominant remaining time is end-to-end transformer compute (long context, wide matrices) plus FSDP communication; eliminating the $[B,T,V]$ dense logits tensor lowers peak and allocator pressure but does not remove the $O(B\,T\,d)$ activation checkpoint/recompute path for the trunk.
+Median step time: $\mathbf{7979.43}$\,ms ($\approx\!7.98$\,s, under the 10\,s target). Peak allocated memory: $\approx\!124.1$\,GiB per rank.
 
 \end{document}
