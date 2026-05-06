@@ -253,21 +253,12 @@ Forward-only time improves sharply for \emph{small} and \emph{medium} ($\sim2\ti
 \question{Problem: FlashAttention-2 Forward Pass}
 Script: \texttt{cs336\_systems/gpu\_kernels/flash\_attention.py}.
 
-\subquestion{(a) PyTorch FlashAttention-2 forward}
-\texttt{pytest -k test\_flash\_forward\_pass\_pytorch} passes.
-
-\subquestion{(b) Triton FlashAttention-2 forward}
-\texttt{pytest -k test\_flash\_forward\_pass\_triton} passes.
-
-\subquestion{(c) Causal masking}
-\texttt{pytest -k test\_flash\_forward\_pass} passes for causal and non-causal modes.
-
 \question{Problem: FlashAttention-2 Backward Pass}
-Script: \texttt{cs336\_systems/gpu\_kernels/flash\_attention.py}. \texttt{pytest -k test\_flash\_backward} passes.
+Script: \texttt{cs336\_systems/gpu\_kernels/flash\_attention.py}.
 
 \question{Problem: FlashAttention-2 Benchmarking}
 \subquestion{(a) Triton versus PyTorch attention}
-Table~\ref{tab:flash-benchmark-modal} compares the Triton fused forward plus \texttt{torch.compile} dense recomputation backward (\texttt{FlashAttention2Triton}) against regular dense PyTorch attention (matmul, masked softmax, matmul). Batch size is $1$, masking is causal, and inputs are random draws fixed per $(T,d,\mathrm{dtype})$ seed. Timings are median milliseconds from \texttt{triton.testing.do\_bench} ($25$ warm-up, $100$ repeats) on a single Modal B200. Sequence lengths sweep $T\in\{128,\ldots,65536\}$ (powers of two), head dimensions $d\in\{16,\ldots,128\}$ (powers of two), dtypes BF16 and FP32.
+Table~\ref{tab:flash-benchmark-modal} compares the Triton fused forward plus \texttt{torch.compile} dense recomputation backward (\texttt{FlashAttention2Triton}) against regular dense PyTorch attention (matmul, masked softmax, matmul).
 
 \begin{table}[H]
   \centering
@@ -281,13 +272,9 @@ Table~\ref{tab:flash-benchmark-modal} compares the Triton fused forward plus \te
   \label{tab:flash-benchmark-modal}
 \end{table}
 
-At short sequences ($T\lesssim 2{,}048$), Triton forward is already much faster than materializing a full $T\times T$ softmax matrix. Reported backward times remain on the same order as the dense baseline because both paths run a dense-gradient-style backward through large logits. At large $T$, the fused forward gap grows; for example at $T{=}65536$, $d{=}128$, BF16: $\approx 30$\,ms dense versus $\approx 17$\,ms Triton forward. End-to-end latency is often dominated by backward work unless a fully fused backward is implemented. BF16 versus FP32 shifts absolute milliseconds but does not change the qualitative comparison.
-
 \section*{5 Distributed Data Parallel Training}
 
 \question{Problem: Distributed Communication (Single Node)}
-Single-node benchmarks use the NCCL backend with \texttt{torch.multiprocessing.spawn}. Each trial allocates a 1D FP32 tensor on the CUDA device matching the process rank. Five warm-up \texttt{dist.all\_reduce} operations precede twenty-five timed iterations, each bracketed by \texttt{torch.cuda.synchronize()}. Every rank takes the median iteration time; results are aggregated across ranks by the mean via \texttt{dist.all\_gather\_object}. World sizes $\{2,4,6\}$ share one Modal container with six B200 GPUs.
-
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.92\linewidth]{figures/distributed_allreduce_modal.png}
@@ -303,13 +290,12 @@ Single-node benchmarks use the NCCL backend with \texttt{torch.multiprocessing.s
   \label{tab:dist-allreduce-modal}
 \end{table}
 
-At $1024$\,MiB, timings are about $1.89$\,ms with two GPUs, $2.52$\,ms with four, and $2.75$\,ms with six. Adding ranks increases latency at fixed per-GPU payload because collective algorithms pay extra hops or synchronization even though each device sends comparable traffic. At $1$\,MiB the runs are launch-bound ($\approx 0.027$--$0.041$\,ms), so differences across world sizes are dominated by fixed NCCL overhead rather than bandwidth. Between those extremes the curves bend toward bandwidth-limited scaling where milliseconds grow roughly with MiB moved.
+At $1024$\,MiB, timings are about $1.89$\,ms with two GPUs, $2.52$\,ms with four, and $2.75$\,ms with six. Adding ranks increases latency at fixed per-GPU payload because collective algorithms pay extra hops or synchronization even though each device sends comparable traffic. At $1$\,MiB the runs are launch-bound ($\approx 0.027$--$0.041$\,ms), so differences across world sizes are dominated by fixed NCCL overhead rather than bandwidth.
 
 \question{Problem: Naive DDP}
-\texttt{NaiveDDP} plus blocking \texttt{naive\_ddp\_sync\_gradients} (per-tensor \texttt{all\_reduce}, tied-weight dedupe) live in \texttt{cs336\_systems/distributed\_training/naive\_ddp.py}. The naive sync path is retained for XL timing baselines.
+Script: \texttt{distributed\_training/naive\_ddp.py}
 
 \question{Problem: Naive DDP Benchmarking}
-Benchmark driver: \texttt{modal run cs336\_systems/distributed\_training/modal/naive\_ddp\_benchmark\_modal.py}. Single Modal machine with two B200 GPUs; NCCL; \texttt{BasicsTransformerLM} at \emph{xl} ($d_{\mathrm{model}}{=}2560$, $32$ layers, $32$ heads, $d_{\mathrm{FF}}{=}10240$, vocab $10{,}000$, context $2048$); global batch $2$; BF16 \texttt{torch.autocast}; AdamW ($lr{=}10^{-4}$); five warm-ups and twenty-five timed steps.
 
 \begin{table}[H]
   \centering
@@ -328,7 +314,6 @@ Benchmark driver: \texttt{modal run cs336\_systems/distributed\_training/modal/n
 Compute dominates at this configuration: $\sim$$375$\,ms total versus $\sim$$36$\,ms in blocking gradient collectives, giving a communication fraction of about $9.7\%$.
 
 \question{Problem: Minimal DDP with Flat Gradients Benchmarking}
-\texttt{flat\_ddp\_sync\_gradients} in \texttt{cs336\_systems/distributed\_training/naive\_ddp.py} packs distinct gradients with \texttt{torch.\_utils.\_flatten\_dense\_tensors}, issues one \texttt{all\_reduce(SUM)}, divides by \texttt{world\_size}, then unflattens and copies back.
 
 \begin{table}[H]
   \centering
@@ -342,14 +327,14 @@ Compute dominates at this configuration: $\sim$$375$\,ms total versus $\sim$$36$
     Overlap (async; see overlapping DDP below) & $357.91$ & $52.78$ & $0.148$ \\
     \bottomrule
   \end{tabular}
-  \caption{XL step timings (one Modal run; blocking variants synchronize before timed comm). Overlap row: wall clock of \texttt{finish\_gradient\_synchronization} only; NCCL overlaps backward so this interval is not directly comparable to blocking comm time, while total step drops.}
+  \caption{XL step timings (one Modal run; blocking variants synchronize before timed comm). NCCL overlaps backward so this interval is not directly comparable to blocking comm time, while total step drops.}
   \label{tab:ddp-flat-vs-naive}
 \end{table}
 
-Flattening matches naive blocking within run-to-run noise. Overlapping cuts total iteration by $\sim$$17$\,ms ($\sim$$4.6\%$) versus blocking naive because backward GEMMs hide much of the gradient traffic.
+Flattening matches naive blocking. Overlapping cuts total iteration by $\sim$$17$\,ms ($\sim$$4.6\%$) versus blocking naive.
 
 \question{Problem: DDP with Overlapping Individual Parameters}
-\texttt{OverlappingDDP} (\texttt{cs336\_systems/distributed\_training/overlapping\_ddp.py}) broadcasts parameters from rank~0. Each \texttt{requires\_grad} parameter registers \texttt{register\_post\_accumulate\_grad\_hook}, which issues \texttt{dist.all\_reduce(..., async\_op=True)} on the accumulated gradient and stores the work handle. \texttt{finish\_gradient\_synchronization()} calls \texttt{work.wait()}, then \texttt{div\_}(\texttt{world\_size}) per tensor, and clears the handle list. Tests pass: \texttt{pytest tests/test\_ddp.py}.
+Script: \texttt{overlapping\_ddp.py}
 
 \question{Problem: DDP Overlapping Individual Parameters Benchmarking}
 \subquestion{(a) Runtime comparison}
@@ -375,39 +360,34 @@ Figure~\ref{fig:ddp-trace-naive-cartoon} shows naive blocking sync: backward com
 \section*{6 Optimizer State Sharding}
 
 \question{Problem: Optimizer State Sharding}
-\texttt{ShardedOptimizer} (\texttt{cs336\_systems/distributed\_training/sharded\_optimizer.py}) subclasses \texttt{torch.optim.Optimizer}. \texttt{add\_param\_group} assigns each parameter an owner rank in round-robin order (\texttt{idx \% world\_size}). The wrapped \texttt{optimizer\_cls} instance only receives locally owned parameters, so AdamW moments live on one rank per tensor. \texttt{step} runs the inner optimizer then \texttt{dist.broadcast(p.data, src=owner)} so all ranks share updated weights. Tests pass: \texttt{uv run pytest tests/test\_sharded\_optimizer.py}.
+Script: \texttt{cs336\_systems/distributed\_training/sharded\_optimizer.py}
 
 \question{Problem: Optimizer State Sharding Accounting}
-Profiler: \texttt{modal run cs336\_systems/distributed\_training/modal/sharded\_optimizer\_benchmark\_modal.py}. Single Modal node, two B200 GPUs, NCCL; \texttt{BasicsTransformerLM} at course \emph{xl} ($d_{\mathrm{model}}{=}2560$, $32$ layers, context $2048$, batch $2$ global); FP32 parameters; BF16 \texttt{autocast} forward; AdamW hyperparameters $lr{=}10^{-4}$, $\beta{=}(0.9,0.999)$, $\varepsilon{=}10^{-8}$, weight decay $0.01$.
+Profiler script: \texttt{modal run sharded\_optimizer\_benchmark\_modal.py}.
 
 \subquestion{(a) Peak memory accounting}
-After model initialization, peak is $\approx 12{,}997$\,MiB for both settings, dominated by FP32 weights ($\approx 12{,}996$\,MiB by tensor-count). Immediately before the optimizer step, the run peaks at $\approx 84{,}326$\,MiB baseline versus $\approx 71{,}331$\,MiB sharded. Activations and gradients from the XL backward dwarf static tensors, but halving per-rank Adam state removes roughly one full parameter tensor worth of footprint ($\approx 13$\,GiB) from the hot path, matching $(1{-}1/N)$ scaling of optimizer tensors at $N{=}2$. Optimizer-state tensors: baseline $\approx 25{,}992$\,MiB ($\approx 2\times$ weights, FP32 \texttt{exp\_avg}/\texttt{exp\_avg\_sq}); sharded $\approx 12{,}996$\,MiB per rank on average ($\approx 1\times$ weights). Gradients at snapshot are $\approx 12{,}996$\,MiB in both cases (full replication). Peak does not rise further after \texttt{step} in this configuration.
+After model initialization, peak is $\approx 12{,}997$\,MiB for both settings, dominated by FP32 weights ($\approx 12{,}996$\,MiB by tensor-count). Immediately before the optimizer step, the run peaks at $\approx 84{,}326$\,MiB baseline versus $\approx 71{,}331$\,MiB sharded. Activations and gradients from the XL backward dwarf static tensors, but only having half og the Adam state per rank removes roughly one full parameter tensor worth of memory traffic ($\approx 13$\,GiB) from the hot path, matching $(1{-}1/N)$ scaling of optimizer tensors at $N{=}2$. Optimizer-state tensors: baseline $\approx 25{,}992$\,MiB ($\approx 2\times$ weights, FP32 \texttt{exp\_avg}/\texttt{exp\_avg\_sq}); sharded $\approx 12{,}996$\,MiB per rank on average ($\approx 1\times$ weights). Gradients at snapshot are $\approx 12{,}996$\,MiB in both cases. Peak does not rise further after \texttt{step} in this configuration.
 
 \subquestion{(b) Training speed}
-Mean iteration latency is $\approx 342.9$\,ms without sharding versus $\approx 343.4$\,ms with sharding ($\lesssim 0.2\%$ slower). One broadcast per parameter after each step roughly offsets the cheaper optimizer update. Both configurations sit at the same XL compute ceiling.
+Mean iteration latency is $\approx 342.9$\,ms without sharding versus $\approx 343.4$\,ms with sharding ($\lesssim 0.2\%$ slower). One broadcast per parameter after each step roughly compensates for the cheaper optimizer update. Both configurations have the same XL compute maximumm.
 
 \subquestion{(c) Comparison with ZeRO stage 1}
-ZeRO stage~1 also shards optimizer state across data-parallel ranks with comparable per-rank optimizer memory. Our prototype keeps full parameters and gradients on every rank and synchronizes with dense \texttt{broadcast} each step, rather than fusing communication with backward or partitioning gradients. Production ZeRO integrates partitioned states with gradient \texttt{reduce-scatter} and \texttt{all-gather} schedules and overlaps communication. Here, bandwidth scales roughly as ``full parameter tensors $\times$ broadcast'' independent of Adam's shard savings.
+ZeRO Stage 1 reduces memory by sharding the optimizer state across data-parallel ranks. While a production system partitions gradients and parameters using \texttt{reduce-scatter} and \texttt{all-gather} to overlap communication, this prototype maintains full parameters and gradients on every rank. Synchronization is performed via a dense \texttt{broadcast} after each step, meaning the communication bandwidth scales with the full parameter count $P$. Although memory is saved by sharding the optimizer state, the network cost remains proportional to the total model size because the full tensors are moved during synchronization.
 
 \section*{7 Fully-Sharded Data Parallel}
 
 \question{Problem: Fully-Sharded Data Parallel}
-\texttt{FullyShardedDataParallel} (\texttt{cs336\_systems/distributed\_training/fsdp/fully\_sharded\_parallel.py}) wraps only \texttt{cs336\_basics} \texttt{Linear}/\texttt{Embedding}; norms stay replicated. Forward: async \texttt{all\_gather} for layer $k{+}2$ begins after layer $k$ finishes (\texttt{register\_forward\_hook}); layers $0$ and $1$ use synchronous gathers; payloads use \texttt{compute\_dtype} on the wire when set (masters remain FP32). Backward: \texttt{Tensor.register\_hook} on layer outputs waits for async gathers scheduled when gradients reach layer $k{+}2$, then schedules prefetch for layer $k{-}2$; the last two sharded layers use synchronous gathers. Gradients: \texttt{finish\_gradient\_synchronization} launches async \texttt{reduce\_scatter\_tensor} (\texttt{SUM}/world\_size) on full per-layer gradients plus waits on replicated gradient \texttt{all\_reduce}s. Tests pass: \texttt{uv run pytest tests/test\_fsdp.py}.
+Script: \texttt{fully\_sharded\_parallel.py}
 
 \question{Problem: FSDP Accounting}
-\subquestion{(a) Expected peak-memory savings}
-\texttt{FullyShardedDataParallel} shards every \texttt{cs336\_basics} \texttt{Linear} and \texttt{Embedding} weight along dimension~$0$ across $N{=}2$ ranks, while \texttt{RMSNorm} parameters stay replicated. For the course \emph{xl} \texttt{BasicsTransformerLM} ($d_{\mathrm{model}}{=}2560$, $d_{\mathrm{FF}}{=}10240$, $32$ layers, vocab $10{,}000$), the vast majority of parameters live in blocks and the LM head, with a smaller replicated contribution from norm scales.
-
 Let $P_{\mathrm{shard}}$ denote the total parameter count in sharded modules and $P_{\mathrm{repl}}$ the replicated count. A naive data-parallel replica stores $(P_{\mathrm{shard}}+P_{\mathrm{repl}})$ FP32 parameter tensors on \emph{each} GPU (ignoring optimizer state for the moment). FSDP stores $(P_{\mathrm{shard}}/N + P_{\mathrm{repl}})$ per rank, so static parameter HBM drops by approximately
 \[
   \Delta_{\mathrm{stat}} \;\approx\; \Bigl(1 - \frac{1}{N}\Bigr)\,P_{\mathrm{shard}}\,s_{\mathrm{p}},
 \]
-where $s_{\mathrm{p}}{=}4$\,bytes for FP32 masters. With $N{=}2$ this is roughly half of the sharded parameter footprint per rank versus DDP.
-
-This is only a \emph{lower bound} on what matters for peak: the forward pass \texttt{all\_gather}s each weight into a full-width FP32 leaf (\texttt{\_make\_leaf\_from\_gathered}) for matmul, and the implementation prefetches the next layer while the current one computes. So transient peak includes at least one (often two) full gathered tensors in flight. At short-to-medium context, those gathers can dominate the peak story; at long context with dense attention, Table~\ref{tab:memory-peaks} and Sec.~2 already show activation storage can dominate, diluting the benefit of sharding on end-to-end peak \texttt{max\_memory\_allocated}. Qualitatively, FSDP trades repeated small static shards for layered transient gathers---helpful when weights are large relative to activations, which is the regime targeted by the assignment leaderboard.
+where $s_{\mathrm{p}}{=}4$\,bytes for FP32 masters. With $N{=}2$ this is roughly half of the sharded parameter footprint per rank versus DDP. This is only a lower bound on what matters for peak because we ignore all-gather weights. 
 
 \subquestion{(b) Weight all-gather profiling}
-Nsight timelines were captured for the \emph{xl} model wrapped in course FSDP on two GPUs, focusing on the embedding/first linear units (where the hand implementation forces synchronous \texttt{all\_gather}) versus a deeper linear later in the stack (where async prefetch can overlap).
+Nsight timelines were captured for the \emph{xl} model wrapped in course FSDP on two GPUs, focusing on the embedding/first linear units (where the hand implementation forces synchronous \texttt{all\_gather}) versus a deeper linear layer later in the stack (where async prefetch can overlap).
 
 \begin{figure}[H]
   \centering
@@ -534,7 +514,7 @@ about four times smaller than the overlapped case. Discrete searches with exact 
 \section*{9 Leaderboard}
 
 \question{Problem: Leaderboard}
-Two NVIDIA B200 GPUs (Modal), assignment 8B-class config. Key techniques: course \texttt{FullyShardedDataParallel} with \texttt{compute\_dtype=bfloat16}, per-block gradient checkpointing, PyTorch \texttt{scaled\_dot\_product\_attention}, and chunked vocab cross-entropy to avoid materializing $[B,T,V]$ logits.
+Techniques: \texttt{FullyShardedDataParallel} with \texttt{compute\_dtype=bfloat16}, per-block gradient checkpointing, and chunked vocab cross-entropy to avoid materializing $[B,T,V]$ logits.
 
 \begin{table}[H]
   \centering
@@ -542,7 +522,5 @@ Two NVIDIA B200 GPUs (Modal), assignment 8B-class config. Key techniques: course
   \caption{Best leaderboard timing ($2\times$B200, Modal).}
   \label{tab:leaderboard-8b}
 \end{table}
-
-Median step time: $7979.43$\,ms ($\approx\!7.98$\,s, under the 10\,s target). Peak allocated memory: $\approx\!124.1$\,GiB per rank.
 
 \end{document}
