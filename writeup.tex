@@ -143,9 +143,39 @@ The post-embedding hidden states entering each block have shape $[\text{batch}, 
 The dominant blocks are on the order of $\sim$2\,GiB per-layer, matching FP32 tensors shaped like pre-softmax scores or attention weights $[B, n_{\text{heads}}, T, T]$ (e.g.\ $4 \times 32 \times 2048^2 \times 4$\,bytes $\approx 2$\,GiB at batch $4$). Stack traces point into \texttt{scaled\_dot\_product\_attention} and the \texttt{einsum} forming $QK^\top$, then the \texttt{softmax} path that materializes the normalized weights.
 
 \subquestion{(f) Per-block memory attribution}
-The five largest tensors saved for backward by one xl \texttt{TransformerBlock} (batch 4, context 2048, FP32) are: (1) the pre-softmax attention score matrix $\mathbf{S}=\mathbf{QK}^\top/\!\sqrt{d}$, shape $[4,32,2048,2048]$, $\approx\!2048$\,MiB; (2) the post-softmax weight matrix $\mathbf{P}=\mathrm{softmax}(\mathbf{S})$, identical shape, $\approx\!2048$\,MiB; (3) the SwiGLU first gate $x_1 = xW_1$, shape $[4,2048,10240]$, $320$\,MiB; (4) the SwiGLU second gate $x_2 = xW_2$, same shape, $320$\,MiB; (5) the block's residual input $x$, shape $[4,2048,2560]$, $80$\,MiB. These five total $\approx\!4816$\,MiB. $\mathbf{S}$ and $\mathbf{P}$ alone account for roughly $85\%$ of the dominant footprint, confirming that dense $O(T^2)$ attention dominates activation storage at long context.
+Figure~\ref{fig:memory-viz-per-block} shows the \texttt{pytorch.org/memory\_viz} active-memory timeline zoomed to the forward pass of the \emph{xl} model (batch 2, context 2048, FP32, from \texttt{xl\_ctx2048\_fbo\_fp32\_b2.pickle}), with Detail set to reveal the largest individual allocations. Clicking each colored band exposes the allocation size and Python/C++ stack trace.
 
-During backward, saved tensors are freed while weight gradients are emitted. Weight gradients for one xl block total roughly $400$\,MiB: four attention projection matrices ($\mathbf{W}_Q,\mathbf{W}_K,\mathbf{W}_V,\mathbf{W}_O$) at $2560^2\times 4\,\text{B}\approx25$\,MiB each, plus the three MLP matrices ($W_1,W_2$ each $2560\times 10240\times 4\,\text{B}=100$\,MiB and $W_3$ at the same). The ${\sim}4816$\,MiB of dominant activations is about $12\times$ the ${\sim}400$\,MiB of weight gradients produced, so peak memory during a full training step is activation-dominated rather than gradient-dominated. This is consistent with Table~\ref{tab:memory-peaks}: the full-step peak grows steeply with context length (reflecting $O(T^2)$ attention matrices) while the weight-gradient contribution is constant in $T$.
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/memory_viz_per_block_annotated.png}
+  \caption{Active-memory timeline zoomed to the forward pass (\emph{xl}, batch 2, ctx 2048, FP32). Each colored band is one large allocation; colors correspond to the legend in the text.}
+  \label{fig:memory-viz-per-block}
+\end{figure}
+
+\paragraph{Attention tensors (each 1\,GiB, shape $[2,32,2048,2048]$ in FP32).}
+The custom softmax in \texttt{nn\_utils.py} is implemented step-by-step rather than as a fused kernel, so PyTorch's autograd traces six separate $[B,H,T,T]$ allocations per attention layer:
+\begin{enumerate}
+  \item \textbf{Pink}: $\mathbf{QK}^\top$ --- output of \texttt{einsum} at \texttt{model.py:427}.
+  \item \textbf{Brown}: $\mathbf{S}=\mathbf{QK}^\top/\sqrt{d}$ --- \texttt{div} at \texttt{model.py:427}.
+  \item \textbf{Blue (bottom)}: masked scores --- \texttt{where} (causal mask) at \texttt{model.py:430}.
+  \item \textbf{Light blue}: $\mathbf{S}-\max(\mathbf{S})$ --- \texttt{sub} at \texttt{nn\_utils.py:5} (numerical stability shift).
+  \item \textbf{Green}: $\exp(\mathbf{S}-\max)$ --- \texttt{exp} at \texttt{nn\_utils.py:6}.
+  \item \textbf{Purple}: $\mathbf{P}=\mathrm{softmax}(\mathbf{S})$ --- \texttt{div} at \texttt{nn\_utils.py:7}.
+\end{enumerate}
+
+\paragraph{SwiGLU/MLP tensors (each 160\,MiB, shape $[2,2048,10240]$ in FP32).}
+Five further allocations appear from the feed-forward block:
+\begin{enumerate}
+  \item \textbf{Brown (top)}: $x_1=xW_1$ --- \texttt{einsum} through \texttt{Linear} at \texttt{model.py:39}.
+  \item \textbf{Grey}: $\sigma(x_2)$ --- \texttt{sigmoid} at \texttt{model.py:532} inside \texttt{silu}.
+  \item \textbf{Blue (top)}: $\mathrm{silu}(x_2)=x_2\cdot\sigma(x_2)$ --- \texttt{mul} at \texttt{model.py:532}.
+  \item \textbf{Orange}: $x_2=xW_2$ --- \texttt{einsum} through \texttt{Linear} at \texttt{model.py:39}.
+  \item \textbf{Red}: $z=x_1\cdot\mathrm{silu}(x_2)$ (SwiGLU gate output) --- \texttt{mul} at \texttt{model.py:399}.
+\end{enumerate}
+
+The dominant footprint is the six $1$\,GiB attention tensors ($6$\,GiB per block with batch 2, $12$\,GiB with batch 4). This reveals a key implementation detail: because the softmax is \emph{not} fused, autograd must save every intermediate --- raw scores, scaled scores, masked scores, stability-shifted scores, exponentials, and the final probabilities --- rather than just $\mathbf{S}$ and $\mathbf{P}$. FlashAttention and \texttt{torch.compile} eliminate this overhead by fusing the softmax into a single kernel that only emits $\mathbf{P}$ (or recomputes it on the fly), explaining their dramatic activation-memory savings.
+
+During backward, saved tensors are freed while weight gradients are emitted. Weight gradients for one xl block total roughly $400$\,MiB: four attention projection matrices ($\mathbf{W}_Q,\mathbf{W}_K,\mathbf{W}_V,\mathbf{W}_O$) at $2560^2\times 4\,\text{B}\approx25$\,MiB each, plus the three MLP matrices ($W_1,W_2$ each $2560\times 10240\times 4\,\text{B}=100$\,MiB and $W_3$ at the same). The ${\gtrsim}6$\,GiB of dominant attention activations per block (batch 2) is more than $15\times$ the ${\sim}400$\,MiB of weight gradients produced, so peak memory during a full training step is activation-dominated rather than gradient-dominated. This is consistent with Table~\ref{tab:memory-peaks}: the full-step peak grows steeply with context length (reflecting $O(T^2)$ attention matrices) while the weight-gradient contribution is constant in $T$.
 
 \section*{3 Single-GPU Memory}
 
@@ -509,21 +539,15 @@ about four times smaller than the overlapped case. Discrete searches with exact 
 \section*{9 Leaderboard}
 
 \question{Problem: Leaderboard}
-The leaderboard entry benchmarks one full AdamW training step on \textbf{two NVIDIA B200 GPUs} using the assignment §9 ``8B-class'' configuration in \newline\texttt{cs336\_systems/leaderboard/config.py}: batch size $2$, context $32{,}768$, vocabulary $151{,}936$, $d_{\mathrm{model}}{=}4096$, $d_{\mathrm{FF}}{=}11{,}008$, $34$ transformer layers, and $32$ heads. The timed body is implemented in \texttt{cs336\_systems/leaderboard/bench\_core.py}: NCCL initialized via \texttt{torchrun --standalone --nproc\_per\_node=2}, \texttt{BasicsTransformerLM} in FP32 with \texttt{torch.autocast(..., dtype=torch.bfloat16)} around the microbatched forward/backward, course \texttt{FullyShardedDataParallel(compute\_dtype=torch.bfloat16)}, and AdamW (\texttt{fused=True} with \texttt{foreach}/vanilla fallbacks).
-
-\textbf{Memory:} Per-block \texttt{torch.utils.checkpoint} stays enabled (\texttt{LEADERBOARD\_GRAD\_CKPT=1}). Without it, storing full activations for $B{=}2$, $T{=}32\mathrm{k}$, and $34$ layers exhausts $\sim$178\,GiB per device before the LM head; checkpointing trades recomputation for a feasible resident footprint.
-
-\textbf{Throughput:} Attention uses PyTorch \texttt{scaled\_dot\_product\_attention} (fused backends): the leaderboard entry patches \texttt{cs336\_basics.model.scaled\_dot\_product\_attention} accordingly (not the course Triton FlashAttention-2 path), prioritizing wall clock. The LM head does not materialize logits of shape $[B,T,V]$: chunked vocab cross-entropy (\texttt{cs336\_systems/leaderboard/chunked\_ce.py}) applies the FSDP-gathered head weight in row chunks with an online log-sum-exp; softmax statistics stay in FP32 with explicit FP32 chunk logits under autocast.
-
-\textbf{Timing:} After a synchronized warm-up step, the reported metric is the median wall-clock milliseconds from rank~0 via\linebreak \texttt{triton.testing.do\_bench} on \texttt{train\_step}, with \texttt{warmup=25}, \texttt{rep=80}, and \texttt{return\_mode="median"}. Peak memory is \texttt{torch.cuda.max\_memory\_allocated()} on rank~0 after the benchmark. The run was executed on \textbf{Modal} (\texttt{modal\_leaderboard\_benchmark.py} deploying \texttt{cs336\_systems} and \texttt{cs336-basics} into the container).
+Two NVIDIA B200 GPUs (Modal), assignment 8B-class config. Key techniques: course \texttt{FullyShardedDataParallel} with \texttt{compute\_dtype=bfloat16}, per-block gradient checkpointing, PyTorch \texttt{scaled\_dot\_product\_attention}, and chunked vocab cross-entropy to avoid materializing $[B,T,V]$ logits.
 
 \begin{table}[H]
   \centering
   \input{tables/leaderboard_8b_modal.tex}
-  \caption{Best §9 leaderboard timing (Modal, $2\times$B200; SDPA attention + chunked LM+CE, grad checkpoint on).}
+  \caption{Best leaderboard timing ($2\times$B200, Modal).}
   \label{tab:leaderboard-8b}
 \end{table}
 
-The median step time is $\mathbf{7979.43}$\,\textbf{ms} ($\approx 7.98$\,s), under the $10$\,s target, with peak allocated memory $\approx 124.1$\,GiB per rank. The dominant remaining time is end-to-end transformer compute (long context, wide matrices) plus FSDP communication; eliminating the $[B,T,V]$ dense logits tensor lowers peak and allocator pressure but does not remove the $O(B\,T\,d)$ activation checkpoint/recompute path for the trunk.
+Median step time: $\mathbf{7979.43}$\,ms ($\approx\!7.98$\,s, under the 10\,s target). Peak allocated memory: $\approx\!124.1$\,GiB per rank.
 
 \end{document}
