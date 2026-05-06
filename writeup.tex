@@ -356,20 +356,20 @@ Flattening matches naive blocking within run-to-run noise. Overlapping cuts tota
 See Table~\ref{tab:ddp-flat-vs-naive} (overlap row): mean training iteration $\approx 358$\,ms versus $\approx 375$--$376$\,ms for blocking naive/flat on the same XL two-GPU Modal setup. The reduction is consistent with hiding NCCL behind backward compute. The explicit \texttt{finish\_} window can look larger because remaining collectives drain at the barrier before \texttt{optimizer.step}.
 
 \subquestion{(b) Nsight comparison}
-Figure~\ref{fig:ddp-trace-naive-cartoon} shows naive blocking sync: backward completes, then a contiguous NCCL phase follows. Figure~\ref{fig:ddp-trace-overlap-cartoon} shows overlap: NCCL slices are interleaved with backward.
+Figure~\ref{fig:ddp-trace-naive} shows naive blocking sync: backward completes, then a contiguous NCCL phase follows. Figure~\ref{fig:ddp-trace-overlap} shows overlap: NCCL slices are interleaved with backward.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.95\linewidth]{figures/ddp_trace_naive_cartoon.png}
-  \caption{Cartoon: blocking DDP (backward then communication).}
-  \label{fig:ddp-trace-naive-cartoon}
+  \includegraphics[width=0.95\linewidth]{figures/ddp_trace_naive.png}
+  \caption{Nsight Systems: blocking DDP. GPU compute kernels (backward) complete before NCCL all-reduces begin.}
+  \label{fig:ddp-trace-naive}
 \end{figure}
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.95\linewidth]{figures/ddp_trace_overlap_cartoon.png}
-  \caption{Cartoon: overlapping DDP (communication interleaved with backward).}
-  \label{fig:ddp-trace-overlap-cartoon}
+  \includegraphics[width=0.95\linewidth]{figures/ddp_trace_overlap.png}
+  \caption{Nsight Systems: overlapping DDP. NCCL all-reduce slices interleave with the backward pass.}
+  \label{fig:ddp-trace-overlap}
 \end{figure}
 
 \section*{6 Optimizer State Sharding}
