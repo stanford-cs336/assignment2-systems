@@ -28,10 +28,10 @@ python train.py \
    --vocab_path "../result/tinystories_bpe_vocab.json" \
    --merges "../result/tinystories_bpe_merge.json" \
    --vocab_size 10000 \
-   --d_model 256 \
-   --num_layers 4 \
-   --num_heads 4 \
-   --d_ff 768 \
+   --d_model 768 \
+   --num_layers 16 \
+   --num_heads 16 \
+   --d_ff 3072 \
    --context_length 256 \
    --batch_size 16 \
    --num_steps 15 \
