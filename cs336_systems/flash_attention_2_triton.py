@@ -151,5 +151,28 @@ class FlashAttention2Triton(torch.autograd.Function):
         D=D,
         Q_TILE_SIZE=ctx.Q_TILE_SIZE, K_TILE_SIZE=ctx.K_TILE_SIZE,  IS_CAUSAL=is_causal,
         )
+        ctx.is_casual = is_causal
         ctx.save_for_backward(Q, K, V, O, L)
         return O
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        Q, K, V, O, L = ctx.saved_tensors
+        is_casual = ctx.is_casual
+
+        
+        Bq, Sq, Dq = Q.shape
+        D = torch.sum(O*grad_output, dim=-1)
+        scale_d = 1.0/math.sqrt(Dq)
+        S = torch.matmul(Q, K.transpose(-1, -2))*scale_d
+        if is_casual: 
+            b, s, d = Q.shape
+            mask = torch.tril(torch.ones(s, s, dtype=torch.bool, device=Q.device))
+            S = torch.where(mask, S, float("-inf"))
+        P = torch.exp(S - L[:, :, None])
+        dV = torch.matmul(P.transpose(-1, -2), grad_output)
+        dP = torch.matmul(grad_output, V.transpose(-1, -2)) 
+        dS = P * (dP - D[:, :, None])
+        dQ = torch.matmul(dS, K)*scale_d
+        dK = torch.matmul(dS.transpose(-1, -2), Q)*scale_d
+        return dQ, dK, dV, None
