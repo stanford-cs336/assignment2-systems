@@ -3,7 +3,7 @@ import math
 
 class FlashAttention2Pytorch(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q, K, V: torch.tensor, is_causal=False):
+    def forward(ctx, Q, K, V: torch.tensor, is_casual=False):
         _bq = 16
         _bk = 16
         final_o_list = []
@@ -28,9 +28,9 @@ class FlashAttention2Pytorch(torch.autograd.Function):
                 counter_i+=1
                 # load Q from HBM(pretending to load as this is pytorch) 
 
-                attention_state[f"O{counter_i}_0"] = torch.zeros(_bq, d)
-                attention_state[f"l{counter_i}_0"] = torch.zeros(_bq)
-                attention_state[f"m{counter_i}_0"] = torch.full((_bq,), float('-inf'))
+                attention_state[f"O{counter_i}_0"] = torch.zeros(_bq, d,device=Q.device)
+                attention_state[f"l{counter_i}_0"] = torch.zeros(_bq, device=Q.device)
+                attention_state[f"m{counter_i}_0"] = torch.full((_bq,), float('-inf'), device=Q.device)
                 counter_j = -1
                 for k_chunk, v_chunk in zip(k_chunks, v_chunks):
                     counter_j+=1
@@ -46,6 +46,9 @@ class FlashAttention2Pytorch(torch.autograd.Function):
                     O_prev = attention_state[prev_O_key]
                     l_prev = attention_state[prev_l_key]
                     m_prev = attention_state[prev_m_key]
+                    # print("###############################################################")
+                    # print(f"Q: {q_chunk.device}")
+                    # print(f"m_prev: {m_prev.device}")
                     attention_state[f"S{counter_i}_{counter_j}"] = torch.matmul(q_chunk, k_chunk.T)*scale_d
                     attention_state[f"m{counter_i}_{counter_j}"] = torch.max(m_prev, torch.max(attention_state[f"S{counter_i}_{counter_j}"], dim=1).values)
                     attention_state[f"P{counter_i}_{counter_j}"] = torch.exp(attention_state[f"S{counter_i}_{counter_j}"]-attention_state[f"m{counter_i}_{counter_j}"][:, None])
